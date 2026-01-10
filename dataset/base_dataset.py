@@ -54,6 +54,8 @@ class BaseDataset(Dataset):
     def collate_fn(batch):
         batch_data = {}
         keys = ['point_clouds', 'keypoints', 'centroid', 'radius', 'sequence_index', 'index', 'global_index']
+        if 'mmwave_data' in batch[0]:
+            keys.append('mmwave_data')
         for key in keys:
             batch_data[key] = torch.stack([sample[key] for sample in batch], dim=0)
 

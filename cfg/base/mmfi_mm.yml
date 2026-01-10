@@ -4,14 +4,15 @@ pretrained: False
 sync_batchnorm: False
 clip_grad: null
 precision: 16
-epochs: &epochs 100
+#original 100
+epochs: &epochs 30
 # --------------------------------------
 # Dataset parameters
 # --------------------------------------
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path data/mmfi_lidar.pkl
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_mm/mmfi_mmwave.pkl
     split: [train_rdn_p3, val_rdn_p3]
 val_dataset:
   name: BaseDataset
@@ -21,7 +22,7 @@ val_dataset:
 test_dataset:
   name: BaseDataset
   params:
-    data_path: data/mmfi_lidar.pkl
+    data_path: *data_path
     split: test_rdn_p3
 # --------------------------------------
 # Optimizer parameters
@@ -35,7 +36,7 @@ optim_params:
 # --------------------------------------
 sched_name: CosineAnnealingWarmRestarts
 sched_params:
-  T_0: 20
+  T_0: 6
   eta_min: 1.0e-06
 # --------------------------------------
 # Model parameters
@@ -55,7 +56,8 @@ model_params:
   dim_head: 128
   mlp_dim: 2048
   output_dim: 51
-  features: 1
+  #in model.py, set the input_feat to [:,:,:,3:] for features = 2
+  features: 2
 # --------------------------------------
 # Loss parameters
 # --------------------------------------
@@ -68,7 +70,7 @@ train_pipeline:
   - name: UniformSample
     params: 
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -84,26 +86,26 @@ train_pipeline:
     params: 
       outlier_type: 'box'
       radius: 1.5
-  - name: AddNoisyPoints
-    params:
-      add_std: 0.2
-      num_added: 8
-      zero_centered: false
-  - name: RandomScale
-    params:
-      scale_min: 0.9
-      scale_max: 1.1
-    prob: 0.5
-  - name: RandomRotate
-    params:
-      deg: true
-      angle_min: -10
-      angle_max: 10
-    prob: 0.5
-  - name: RandomTranslate
-    params:
-      translate_range: 0.01
-    prob: 0.5
+  # - name: AddNoisyPoints
+  #   params:
+  #     add_std: 0.2
+  #     num_added: 8
+  #     zero_centered: false
+  # - name: RandomScale
+  #   params:
+  #     scale_min: 0.9
+  #     scale_max: 1.1
+  #   prob: 0.5
+  # - name: RandomRotate
+  #   params:
+  #     deg: true
+  #     angle_min: -10
+  #     angle_max: 10
+  #   prob: 0.5
+  # - name: RandomTranslate
+  #   params:
+  #     translate_range: 0.01
+  #   prob: 0.5
   - name: ReduceKeypointLen
     params:
       only_one: true
@@ -112,17 +114,22 @@ train_pipeline:
   - name: Pad
     params:
       max_len: 256
-  - name: RandomJitter
-    params:
-      jitter_std: 0.05
-    prob: 0.5
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
+  # - name: RandomJitter
+  #   params:
+  #     jitter_std: 0.05
+  #   prob: 0.5
   - name: ToTensor
     params: null
 val_pipeline: &val_pipeline
   - name: UniformSample
     params:
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -146,13 +153,18 @@ val_pipeline: &val_pipeline
   - name: Pad
     params:
       max_len: 256
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
   - name: ToTensor
     params: null
 test_pipeline:
   - name: UniformSample
     params:
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -176,5 +188,10 @@ test_pipeline:
   - name: Pad
     params:
       max_len: 256
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
   - name: ToTensor
     params: null

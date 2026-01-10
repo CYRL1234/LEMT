@@ -82,6 +82,9 @@ class RemoveOutliers():
 
             elif self.outlier_type == 'box':
                 inliers = np.where(np.all(np.abs(sample['point_clouds'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
+                if 'mmwave_data' in sample:
+                    inliers_mmwave = np.where(np.all(np.abs(sample['mmwave_data'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
+                    sample['mmwave_data'][i] = sample['mmwave_data'][i][inliers_mmwave]
             
             else:
                 raise ValueError('You should never reach here!')
@@ -94,32 +97,129 @@ class RemoveOutliers():
         return sample
 
 class Pad():
-    def __init__(self, max_len, pad_type='repeat'):
+    def __init__(self, max_len, pad_type='repeat', mm_len = 256):
         self.max_len = max_len
+        self.mm_len = mm_len
         self.pad_type = pad_type
         if pad_type not in ['zero', 'repeat']:
             raise ValueError('pad_type must be "zero" or "repeat"')
 
+    # def __call__(self, sample):
+    #     for i in range(len(sample['point_clouds'])):
+    #         cur_len = sample['point_clouds'][i].shape[0]
+    #         if cur_len == 0:
+    #             # add random points if the point cloud is empty
+    #             sample['point_clouds'][i] = np.random.normal(0, 1, (self.max_len, sample['point_clouds'][i].shape[1]))
+    #         elif cur_len >= self.max_len:
+    #             indices = np.random.choice(cur_len, self.max_len, replace=False)
+    #             sample['point_clouds'][i] = sample['point_clouds'][i][indices]
+    #         else:
+    #             if self.pad_type == 'zero':
+    #                 sample['point_clouds'][i] = np.pad(sample['point_clouds'][i], ((0, self.max_len - sample['point_clouds'][i].shape[0]), (0, 0)), mode='constant')
+    #             elif self.pad_type == 'repeat':
+    #                 repeat = self.max_len // cur_len
+    #                 residue = self.max_len % cur_len
+    #                 repeated_parts = [sample['point_clouds'][i] for _ in range(repeat)]
+    #                 if residue > 0:
+    #                     indices = np.random.choice(cur_len, residue, replace=False)
+    #                     repeated_parts.append(sample['point_clouds'][i][indices])
+                    
+    #                 sample['point_clouds'][i] = np.concatenate(repeated_parts, axis=0)
+    #             else:
+    #                 raise ValueError('You should never reach here! pad_type must be "zero" or "repeat"')
+        
+
+    #     # pad / crop mmwave_data if present, using analogous logic
+    #     if 'mmwave_data' in sample:
+    #         for i in range(len(sample['mmwave_data'])):
+    #             cur_len = sample['mmwave_data'][i].shape[0]
+    #             if cur_len == 0:
+    #                 sample['mmwave_data'][i] = np.random.normal(0, 1, (self.mm_len, sample['mmwave_data'][i].shape[1]))
+    #             elif cur_len >= self.mm_len:
+    #                 indices = np.random.choice(cur_len, self.mm_len, replace=False)
+    #                 sample['mmwave_data'][i] = sample['mmwave_data'][i][indices]
+    #             else:
+    #                 if self.pad_type == 'zero':
+    #                     sample['mmwave_data'][i] = np.pad(sample['mmwave_data'][i], ((0, self.mm_len - sample['mmwave_data'][i].shape[0]), (0, 0)), mode='constant')
+    #                 elif self.pad_type == 'repeat':
+    #                     repeat = self.mm_len // cur_len
+    #                     residue = self.mm_len % cur_len
+    #                     repeated_parts = [sample['mmwave_data'][i] for _ in range(repeat)]
+    #                     if residue > 0:
+    #                         indices = np.random.choice(cur_len, residue, replace=False)
+    #                         repeated_parts.append(sample['mmwave_data'][i][indices])
+                        
+    #                     sample['mmwave_data'][i] = np.concatenate(repeated_parts, axis=0)
+    #                 else:
+    #                     raise ValueError('You should never reach here! pad_type must be "zero" or "repeat"')
+
+
+    #     sample['point_clouds'] = np.stack(sample['point_clouds'])
+    #     if 'mmwave_data' in sample:
+    #         sample['mmwave_data'] = np.stack(sample['mmwave_data'])
+    #     return sample
     def __call__(self, sample):
-        for i in range(len(sample['point_clouds'])):
-            cur_len = sample['point_clouds'][i].shape[0]
+        # --- Process Point Clouds ---
+        new_pcs = []
+        # Handle the object array from FeatureTransfer by converting to a list
+        point_clouds_list = list(sample['point_clouds'])
+
+        for pc in point_clouds_list:
+            cur_len, num_features = pc.shape
+
             if cur_len == 0:
-                # add random points if the point cloud is empty
-                sample['point_clouds'][i] = np.random.normal(0, 1, (self.max_len, sample['point_clouds'][i].shape[1]))
+                # Add random points if the point cloud is empty
+                new_pcs.append(np.random.normal(0, 1, (self.max_len, num_features)))
             elif cur_len >= self.max_len:
                 indices = np.random.choice(cur_len, self.max_len, replace=False)
-                sample['point_clouds'][i] = sample['point_clouds'][i][indices]
+                new_pcs.append(pc[indices])
             else:
                 if self.pad_type == 'zero':
-                    sample['point_clouds'][i] = np.pad(sample['point_clouds'][i], ((0, self.max_len - sample['point_clouds'][i].shape[0]), (0, 0)), mode='constant')
+                    padded_pc = np.pad(pc, ((0, self.max_len - cur_len), (0, 0)), mode='constant')
+                    new_pcs.append(padded_pc)
                 elif self.pad_type == 'repeat':
                     repeat = self.max_len // cur_len
                     residue = self.max_len % cur_len
-                    indices = np.random.choice(cur_len, residue, replace=False)
-                    sample['point_clouds'][i] = np.concatenate([sample['point_clouds'][i] for _ in range(repeat)] + [sample['point_clouds'][i][indices]], axis=0)
+                    
+                    repeated_parts = [pc] * repeat
+                    if residue > 0:
+                        indices = np.random.choice(cur_len, residue, replace=False)
+                        repeated_parts.append(pc[indices])
+                    
+                    new_pcs.append(np.concatenate(repeated_parts, axis=0))
+        
+        sample['point_clouds'] = np.stack(new_pcs)
+
+        # --- Process mmWave Data (if it exists) ---
+        if 'mmwave_data' in sample:
+            new_mms = []
+            mmwave_data_list = list(sample['mmwave_data'])
+
+            for mm in mmwave_data_list:
+                cur_len, num_features = mm.shape
+
+                if cur_len == 0:
+                    new_mms.append(np.random.normal(0, 1, (self.mm_len, num_features)))
+                elif cur_len >= self.mm_len:
+                    indices = np.random.choice(cur_len, self.mm_len, replace=False)
+                    new_mms.append(mm[indices])
                 else:
-                    raise ValueError('You should never reach here! pad_type must be "zero" or "repeat"')
-        sample['point_clouds'] = np.stack(sample['point_clouds'])
+                    if self.pad_type == 'zero':
+                        padded_mm = np.pad(mm, ((0, self.mm_len - cur_len), (0, 0)), mode='constant')
+                        new_mms.append(padded_mm)
+                    elif self.pad_type == 'repeat':
+                        repeat = self.mm_len // cur_len
+                        residue = self.mm_len % cur_len
+                        
+                        repeated_parts = [mm] * repeat
+                        if residue > 0:
+                            indices = np.random.choice(cur_len, residue, replace=False)
+                            repeated_parts.append(mm[indices])
+                        
+                        new_mms.append(np.concatenate(repeated_parts, axis=0))
+            
+            sample['mmwave_data'] = np.stack(new_mms)
+
         return sample
     
 class MultiFrameAggregate():
@@ -181,6 +281,11 @@ class RandomRotate():
         rot_matrix = np.array([[np.cos(angle_1), -np.sin(angle_1), 0], [np.sin(angle_1), np.cos(angle_1), 0], [0, 0, 1]]) @ np.array([[np.cos(angle_2), 0, np.sin(angle_2)], [0, 1, 0], [-np.sin(angle_2), 0, np.cos(angle_2)]])
         for i in range(len(sample['point_clouds'])):
             sample['point_clouds'][i][...,:3] = sample['point_clouds'][i][...,:3] @ rot_matrix
+        
+        if 'mmwave_data' in sample:
+            for i in range(len(sample['mmwave_data'])):
+                sample['mmwave_data'][i][...,:3] = sample['mmwave_data'][i][...,:3] @ rot_matrix
+        
         if 'keypoints' in sample:
             sample['keypoints'] = sample['keypoints'] @ rot_matrix
         sample['rotation_matrix'] = rot_matrix
@@ -269,9 +374,93 @@ class Normalize():
     def __call__(self, sample):
         for i in range(len(sample['point_clouds'])):
             sample['point_clouds'][i][...,:3] -= sample['centroid'][np.newaxis]
+            if 'mmwave_data' in sample:
+                sample['mmwave_data'][i][...,:3] -= sample['centroid'][np.newaxis]
             if self.feat_scale:
                 sample['point_clouds'][i][...,3:] /= np.array(self.feat_scale)[np.newaxis][np.newaxis]
+                sample['mmwave_data'][i][...,3:] /= np.array(self.feat_scale)[np.newaxis][np.newaxis]
                 sample['feat_scale'] = self.feat_scale
         if 'keypoints' in sample:
             sample['keypoints'] -= sample['centroid'][np.newaxis][np.newaxis]
         return sample
+    
+class FeatureTransfer():
+    def __init__(self, feature_idx=[3,4,5], knn_k=3, transfer_type='empty'):
+        self.feature_idx = feature_idx
+        self.knn_k = knn_k
+        self.transfer_type = transfer_type
+
+    def __call__(self, sample):
+        # ensure we can replace per-frame arrays with larger-feature arrays
+        if isinstance(sample['point_clouds'], np.ndarray):
+            sample['point_clouds'] = [pc for pc in sample['point_clouds']]
+        
+        #ensure valid transfer type
+        if self.transfer_type not in ['mmwave', 'empty']:
+            raise ValueError('invalid transfer_type"')
+        
+        # if transfer empty features
+        if self.transfer_type == 'empty':
+            new_pcs = []
+            for i in range(len(sample['point_clouds'])):
+                num_points = sample['point_clouds'][i].shape[0]
+                empty_feat = np.zeros((num_points, len(self.feature_idx)))
+                new_pc = np.concatenate([sample['point_clouds'][i], empty_feat], axis=1)
+                new_pcs.append(new_pc)
+            try:
+                sample['point_clouds'] = np.stack(new_pcs)
+            except ValueError:
+                # fallback: heterogeneous frames -> ndarray of objects
+                sample['point_clouds'] = np.array(new_pcs, dtype=object)
+            return sample
+
+        # if transfer mmwave features
+        if self.transfer_type == 'mmwave':
+            new_pcs = []
+            for i in range(len(sample['point_clouds'])):
+                pc_xyz = sample['point_clouds'][i][...,:3]
+                mmwave_xyz = sample['mmwave_data'][i][...,:3]
+                mmwave_feat = sample['mmwave_data'][i][...,self.feature_idx]
+                all_xyz = np.concatenate([pc_xyz, mmwave_xyz], axis=0)
+
+                # find the vertices of the bounding cube of all points
+                min_xyz = np.min(all_xyz, axis=0)
+                max_xyz = np.max(all_xyz, axis=0)
+
+                # expand the cube a bit
+                expand_ratio = 0.1
+                min_xyz = min_xyz - (max_xyz - min_xyz) * expand_ratio
+                max_xyz = max_xyz + (max_xyz - min_xyz) * expand_ratio
+
+                # add 0 doppler speed and intensity to the vertices
+                cube_vertices = np.array([[min_xyz[0], min_xyz[1], min_xyz[2]],
+                                        [min_xyz[0], min_xyz[1], max_xyz[2]],
+                                        [min_xyz[0], max_xyz[1], min_xyz[2]],
+                                        [min_xyz[0], max_xyz[1], max_xyz[2]],
+                                        [max_xyz[0], min_xyz[1], min_xyz[2]],
+                                        [max_xyz[0], min_xyz[1], max_xyz[2]],
+                                        [max_xyz[0], max_xyz[1], min_xyz[2]],
+                                        [max_xyz[0], max_xyz[1], max_xyz[2]]])
+                cube_vertex_feat = np.zeros((8, len(self.feature_idx)))
+                mmwave_xyz = np.concatenate([mmwave_xyz, cube_vertices], axis=0)
+                mmwave_feat = np.concatenate([mmwave_feat, cube_vertex_feat], axis=0)
+
+                neighbors = NearestNeighbors(n_neighbors=self.knn_k).fit(mmwave_xyz)
+                distances, indices = neighbors.kneighbors(pc_xyz)
+
+                weights = 1 / (distances + 1e-8)
+                weights = weights / np.sum(weights, axis=1, keepdims=True)
+
+                transferred_feat = np.sum(mmwave_feat[indices] * weights[..., np.newaxis], axis=1)
+                new_pc = np.concatenate([sample['point_clouds'][i], transferred_feat], axis=1)
+                new_pcs.append(new_pc)
+                # sample['point_clouds'][i] = np.concatenate([sample['point_clouds'][i], transferred_feat], axis=1)
+            # sample['point_clouds'] = new_pcs
+            try:
+                sample['point_clouds'] = np.stack(new_pcs)
+            except ValueError:
+                # fallback: heterogeneous frames -> ndarray of objects
+                # print('Warning: heterogeneous point cloud sizes after mmwave feature transfer; using object array.')
+                sample['point_clouds'] = np.array(new_pcs, dtype=object)
+
+            return sample

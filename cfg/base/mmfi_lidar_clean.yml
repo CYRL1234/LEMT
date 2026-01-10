@@ -11,7 +11,7 @@ epochs: &epochs 100
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path data/mmfi_lidar.pkl
+    data_path: &data_path data_clean/mmfi_lidar.pkl
     split: [train_rdn_p3, val_rdn_p3]
 val_dataset:
   name: BaseDataset
@@ -21,7 +21,7 @@ val_dataset:
 test_dataset:
   name: BaseDataset
   params:
-    data_path: data/mmfi_lidar.pkl
+    data_path: data_clean/mmfi_lidar.pkl
     split: test_rdn_p3
 # --------------------------------------
 # Optimizer parameters

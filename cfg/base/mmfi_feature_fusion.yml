@@ -4,14 +4,15 @@ pretrained: False
 sync_batchnorm: False
 clip_grad: null
 precision: 16
-epochs: &epochs 100
+#original 100
+epochs: &epochs 30
 # --------------------------------------
 # Dataset parameters
 # --------------------------------------
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path data/mmfi_lidar.pkl
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_dual/mmfi_dual.pkl
     split: [train_rdn_p3, val_rdn_p3]
 val_dataset:
   name: BaseDataset
@@ -21,7 +22,7 @@ val_dataset:
 test_dataset:
   name: BaseDataset
   params:
-    data_path: data/mmfi_lidar.pkl
+    data_path: *data_path
     split: test_rdn_p3
 # --------------------------------------
 # Optimizer parameters
@@ -35,7 +36,7 @@ optim_params:
 # --------------------------------------
 sched_name: CosineAnnealingWarmRestarts
 sched_params:
-  T_0: 20
+  T_0: 6
   eta_min: 1.0e-06
 # --------------------------------------
 # Model parameters
@@ -43,6 +44,10 @@ sched_params:
 mode: train
 model_name: P4Transformer
 model_params:
+  fusion_mode: 'dual'     # Options: 'none', 'dual'
+  fusion_type: 'late'    # Options: 'early', 'late'
+  lidar_features: 3       # (),() for LiDAR
+  mmwave_features: 2      # doppler + intensity for mmWave
   radius: 0.7
   nsamples: 32
   spatial_stride: 8
@@ -55,7 +60,9 @@ model_params:
   dim_head: 128
   mlp_dim: 2048
   output_dim: 51
-  features: 1
+  features: 3
+  lidar_weight: 1.0
+  mmwave_weight: 0.5
 # --------------------------------------
 # Loss parameters
 # --------------------------------------
@@ -68,7 +75,7 @@ train_pipeline:
   - name: UniformSample
     params: 
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -84,45 +91,56 @@ train_pipeline:
     params: 
       outlier_type: 'box'
       radius: 1.5
-  - name: AddNoisyPoints
-    params:
-      add_std: 0.2
-      num_added: 8
-      zero_centered: false
-  - name: RandomScale
-    params:
-      scale_min: 0.9
-      scale_max: 1.1
-    prob: 0.5
-  - name: RandomRotate
-    params:
-      deg: true
-      angle_min: -10
-      angle_max: 10
-    prob: 0.5
-  - name: RandomTranslate
-    params:
-      translate_range: 0.01
-    prob: 0.5
+  # - name: AddNoisyPoints
+  #   params:
+  #     add_std: 0.2
+  #     num_added: 8
+  #     zero_centered: false
+  # - name: RandomScale
+  #   params:
+  #     scale_min: 0.9
+  #     scale_max: 1.1
+  #   prob: 0.5
+  # - name: RandomRotate
+  #   params:
+  #     deg: true
+  #     angle_min: -10
+  #     angle_max: 10
+  #   prob: 0.5
+  # - name: RandomTranslate
+  #   params:
+  #     translate_range: 0.01
+  #   prob: 0.5
   - name: ReduceKeypointLen
     params:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave' #'mmwave', 'empty'
   - name: Pad
     params:
       max_len: 256
-  - name: RandomJitter
-    params:
-      jitter_std: 0.05
-    prob: 0.5
+      mm_len: 128
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'mmwave'
+  # - name: RandomJitter
+  #   params:
+  #     jitter_std: 0.05
+  #   prob: 0.5
   - name: ToTensor
     params: null
 val_pipeline: &val_pipeline
   - name: UniformSample
     params:
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -143,16 +161,28 @@ val_pipeline: &val_pipeline
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
   - name: Pad
     params:
       max_len: 256
+      mm_len: 128
+      #lidar -> 512, mmwave -> 128
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'mmwave'
   - name: ToTensor
     params: null
 test_pipeline:
   - name: UniformSample
     params:
       pad_type: 'start'
-      clip_len: 7
+      clip_len: 5
   - name: GetCentroid
     params: 
       centroid_type: 'kps'
@@ -173,8 +203,19 @@ test_pipeline:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
   - name: Pad
     params:
       max_len: 256
+      mm_len: 128
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'mmwave'
   - name: ToTensor
     params: null

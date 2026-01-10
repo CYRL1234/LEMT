@@ -8,8 +8,47 @@ import argparse
 import h5py
 from plyfile import PlyData
 import json
-from smpl import SMPL
+# from smpl import SMPL
 import torch
+import os
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+#-----Debug Functions-----#
+def plot_data(point_clouds, mmwave_data, name):
+    # pkl_folder = '/home/ryan/MM-Fi/LEMT/data_dual/mmfi_dual.pkl'  # Change this to your folder path
+    # case_name = 'case_1'  # Specify the case you want to check
+    output_folder = '/home/ryan/MM-Fi/PcDisplay'  # Change this to your desired output folder
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot point clouds (in blue)
+    ax.scatter(point_clouds[:, 0], point_clouds[:, 1], point_clouds[:, 2], c='blue', label='Point Clouds', s=1)
+
+    # Plot mmwave data (in orange) if available
+    if mmwave_data is not None and len(mmwave_data) > 0:
+        ax.scatter(mmwave_data[:, 0], mmwave_data[:, 1], mmwave_data[:, 2], c='orange', label='MMWave Data', s=1)
+
+    # Set requested axis limits: x: [-0.5, 1.0], y: [-1.5, 1.5], z: [2.0, 4.0]
+    ax.set_xlim([-0.5, 1.0])
+    ax.set_ylim([-1.5, 1.5])
+    ax.set_zlim([2.0, 4.0])
+
+    ax.set_xlabel('X Coordinate')
+    ax.set_ylabel('Y Coordinate')
+    ax.set_zlabel('Z Coordinate')
+    ax.set_title('Point Cloud and MMWave Data Visualization')
+    ax.legend()
+
+    # Define output file name
+    output_file = os.path.join(output_folder, f"{name}_frame.png")
+    # Save the plot as an image file
+    plt.savefig(output_file)
+    plt.close()  # Close the figure to free memory
+
+#------------------------#
 
 class Preprocessor():
     def __init__(self, root_dir, out_dir):
@@ -23,6 +62,7 @@ class Preprocessor():
         pass
 
     def save(self, name):
+        print(os.path.join(self.out_dir, f'{name}.pkl'))
         with open(os.path.join(self.out_dir, f'{name}.pkl'), 'wb') as f:
             pickle.dump(self.results, f)
 
@@ -76,15 +116,76 @@ class MiliPointPreprocessor(Preprocessor):
 
     def save(self):
         super().save('milipoint')
+# class MMFiPreprocessor(Preprocessor):
+#     def __init__(self, root_dir, out_dir, modality='mmwave'):
+#         super().__init__(root_dir, out_dir)
+#         self.action_p1 = ['2', '3', '4', '5', '13', '14', '17', '18', '19', '20', '21', '22', '23', '27']
+#         assert modality in ['mmwave', 'lidar', 'dual']  # Added 'dual' mode
+#         self.modality = modality
 
+#     def process(self):
+#         dirs = sorted(glob(os.path.join(self.root_dir, 'E*/S*/A*')))
+
+#         seq_idxs = np.arange(len(dirs))
+#         np.random.shuffle(seq_idxs)
+#         num_train = int(len(seq_idxs) * 0.8)
+#         num_val = int(len(seq_idxs) * 0.1)
+#         self.results['splits']['train_rdn_p3'] = sorted(seq_idxs[:num_train])
+#         self.results['splits']['val_rdn_p3'] = sorted(seq_idxs[num_train:num_train+num_val])
+#         self.results['splits']['test_rdn_p3'] = sorted(seq_idxs[num_train+num_val:])
+
+#         for i, d in tqdm(enumerate(dirs)):
+#             env = int(d.split('/')[-3][1:])
+#             subject = int(d.split('/')[-2][1:])
+#             action = int(d.split('/')[-1][1:])
+#             pcs = []
+#             mmwave_data = None  # Initialize mmWave data storage
+
+#             if self.modality in ['mmwave', 'dual']:
+#                 keep_idxs = []
+#                 for bin_fn in sorted(glob(os.path.join(d.replace('MMFi_Dataset', 'filtered_mmwave'), "frame*.bin"))):
+#                     data_tmp = self._read_bin(bin_fn)
+#                     data_tmp[:, -1] = self._normalize_intensity(data_tmp[:, -1], 40.0)
+#                     data_tmp = data_tmp[:, [1, 2, 0, 3, 4]]
+#                     pcs.append(data_tmp)
+#                     keep_idx = int(os.path.basename(bin_fn).split('.')[0][5:]) - 1
+#                     keep_idxs.append(keep_idx)
+#                 mmwave_data = np.load(os.path.join(d, 'ground_truth.npy'))[keep_idxs,...]
+
+#             if self.modality in ['lidar', 'dual']:
+#                 for bin_fn in sorted(glob(os.path.join(d, "lidar", "frame*.bin"))):
+#                     data_tmp = self._read_bin(bin_fn)
+#                     data_tmp = data_tmp[:, [1, 2, 0]]
+#                     data_tmp[..., 0] = -data_tmp[..., 0]
+#                     pcs.append(data_tmp)
+#                 kps = np.load(os.path.join(d, 'ground_truth.npy'))
+#                 kps[..., 0] = kps[..., 0]
+#                 kps[..., 1] = -kps[..., 1] - 0.2
+#                 kps[..., 2] = kps[..., 2] - 0.1
+
+#             new_pcs = []
+#             for pc, kp in zip(pcs, kps):
+#                 print(f'Before filtering: {len(pc)} points')
+#                 pc = self._filter_pcl(kp, pc, bound=0.2)
+#                 print(f'After filtering: {len(pc)} points')
+#                 new_pcs.append(pc)
+
+#             # Store both LiDAR and mmWave data in the output
+#             self.results['sequences'].append({
+#                 'point_clouds': new_pcs,
+#                 'keypoints': kps,
+#                 'action': action,
+#                 'mmwave_data': mmwave_data if mmwave_data is not None else []  # Add mmWave data if available
+#             })
 class MMFiPreprocessor(Preprocessor):
     def __init__(self, root_dir, out_dir, modality='mmwave'):
         super().__init__(root_dir, out_dir)
         self.action_p1 = ['2', '3', '4', '5', '13', '14', '17', '18', '19', '20', '21', '22', '23', '27']
-        assert modality in ['mmwave', 'lidar']
+        assert modality in ['mmwave', 'lidar', 'dual', 'raw_dual']
         self.modality = modality
 
     def process(self):
+        # print("modality: ",self.modality)
         dirs = sorted(glob(os.path.join(self.root_dir, 'E*/S*/A*')))
 
         seq_idxs = np.arange(len(dirs))
@@ -100,16 +201,62 @@ class MMFiPreprocessor(Preprocessor):
             subject = int(d.split('/')[-2][1:])
             action = int(d.split('/')[-1][1:])
             pcs = []
+            pcs_mmwave = []
+            bug_index = 0
             if self.modality == 'mmwave':
                 keep_idxs = []
-                for bin_fn in sorted(glob(os.path.join(d.replace('MMFi_Dataset', 'filtered_mmwave'), "frame*.bin"))):
+                # for bin_fn in sorted(glob(os.path.join(d.replace('MMFi_Dataset', 'filtered_mmwave'), "frame*.bin"))):
+                for bin_fn in sorted(glob(os.path.join(d, "mmwave", "frame*.bin"))):
                     data_tmp = self._read_bin(bin_fn)
                     data_tmp[:, -1] = self._normalize_intensity(data_tmp[:, -1], 40.0)
                     data_tmp = data_tmp[:, [1, 2, 0, 3, 4]]
+                    data_tmp[..., 0] = -data_tmp[..., 0]
+                    #plot data for debugging
+                    # print("Plotting mmwave data for debugging...")
+                    # plot_data(data_tmp, None, "mmwave_only")
                     pcs.append(data_tmp)
                     keep_idx = int(os.path.basename(bin_fn).split('.')[0][5:]) - 1
                     keep_idxs.append(keep_idx)
                 kps = np.load(os.path.join(d, 'ground_truth.npy'))[keep_idxs,...]
+            elif self.modality == 'dual' or self.modality == 'raw_dual':
+                # print("Processing dual or raw_dual modality...")
+                keep_idxs = []
+                for bin_fn in sorted(glob(os.path.join(d, "mmwave", "frame*.bin"))):
+                    data_tmp = self._read_bin(bin_fn, True)
+                    # if bug_index==0:
+                    #     plot_data(data_tmp, "before_mmwave")
+                    data_tmp[:, -1] = self._normalize_intensity(data_tmp[:, -1], 40.0)
+                    data_tmp = data_tmp[:, [1, 2, 0, 3, 4]]
+                    data_tmp[:, 1] *= -1  # negate y
+                    data_tmp[:, 2] += 0.1  # z + 0.1
+                    # data_tmp[..., 0] = -data_tmp[..., 0]     # negate x like LiDAR
+                    # if bug_index==0:
+                    #     plot_data(data_tmp, "after_mmwave")
+                    #     bug_index+=1
+                    pcs_mmwave.append(data_tmp)
+                    keep_idx = int(os.path.basename(bin_fn).split('.')[0][5:]) - 1
+                    keep_idxs.append(keep_idx)
+
+                kps_mm = np.load(os.path.join(d, 'ground_truth.npy'))[keep_idxs,...]
+                bug_index=0
+                for bin_fn in sorted(glob(os.path.join(d, "lidar", "frame*.bin"))):
+                    data_tmp = self._read_bin(bin_fn)
+                    # if bug_index==0:
+                    #     plot_data(data_tmp, "before")
+                    data_tmp = data_tmp[:, [1, 2, 0]]
+                    data_tmp[..., 0] = -data_tmp[..., 0]
+                    # if bug_index==0:
+                    #     plot_data(data_tmp, "after")
+                    #     bug_index+=1
+                    pcs.append(data_tmp)
+                kps = np.load(os.path.join(d, 'ground_truth.npy'))
+                kps[..., 0] = kps[..., 0]
+                kps[..., 1] = -kps[..., 1]- 0.2
+                kps[..., 2] = kps[..., 2] - 0.1
+                #perform the same for kps_mm
+                kps_mm[..., 0] = kps_mm[..., 0]
+                kps_mm[..., 1] = -kps_mm[..., 1]- 0.2
+                kps_mm[..., 2] = kps_mm[..., 2] - 0.1
             else:
                 for bin_fn in sorted(glob(os.path.join(d, "lidar", "frame*.bin"))):
                     data_tmp = self._read_bin(bin_fn)
@@ -121,14 +268,48 @@ class MMFiPreprocessor(Preprocessor):
                 kps[..., 1] = -kps[..., 1]- 0.2
                 kps[..., 2] = kps[..., 2] - 0.1
             new_pcs = []
-            for pc, kp in zip(pcs, kps):
-                pc = self._filter_pcl(kp, pc, bound=0.2)
-                new_pcs.append(pc)
-            self.results['sequences'].append({
-                'point_clouds': new_pcs,
-                'keypoints': kps,
-                'action': action
-            })
+            mmwave_data = []
+            #plot every frame before filtering
+            # if self.modality == 'dual' and len(pcs)>0 and len(pcs_mmwave)>0:
+            #     for pc, mm in zip(pcs, pcs_mmwave):
+            #         plot_data(pc,mm, "before_filtering_dual")
+            #         break
+            # plot_data(pcs[0],pcs_mmwave[0], "before_filtering_lidar")
+            if self.modality != 'raw_dual':
+                for pc, kp in zip(pcs, kps):
+                    # print(f'Before filtering: {len(pc)} points')
+                    # plot_data(pc, None, "before_filtered_lidar")
+                    pc = self._filter_pcl(kp, pc, bound=0.2)
+                    # plot_data(pc, None, "filtered_lidar")
+                    # print(f'After filtering: {len(pc)} points')
+                    new_pcs.append(pc)
+                # print("len pcs_mmwave: ", len(pcs_mmwave) if self.modality == 'dual' else 0)
+                if self.modality == 'dual':
+                    for mm, kp in zip(pcs_mmwave, kps_mm):
+                        # print(f'Before filtering: {len(mm)} points')
+                        mm = self._filter_pcl(kp, mm, bound=0.2)
+                        # plot_data(mm, "filtered_mmwave")
+                        # print(f'After filtering: {len(mm)} points')
+                        mmwave_data.append(mm)
+            else:
+                new_pcs = pcs
+                mmwave_data = pcs_mmwave
+            # # plot a frame after filtering
+            # if self.modality == 'dual' and len(new_pcs)>0 and len(mmwave_data)>0:
+            #     plot_data(new_pcs[0],mmwave_data[0], "after_filtering_dual")   
+            if self.modality == 'dual' or self.modality == 'raw_dual':
+                self.results['sequences'].append({
+                    'point_clouds': new_pcs,
+                    'keypoints': kps_mm if self.modality == 'raw_dual' else kps,
+                    'action': action,
+                    'mmwave_data': mmwave_data 
+                })
+            else:
+                self.results['sequences'].append({
+                    'point_clouds': new_pcs,
+                    'keypoints': kps,
+                    'action': action                    
+                })
 
             if i in self.results['splits']['train_rdn_p3']:
                 if action in self.action_p1:
@@ -187,11 +368,15 @@ class MMFiPreprocessor(Preprocessor):
     def save(self):
         super().save('mmfi_' + self.modality)
 
-    def _read_bin(self, bin_fn):
+    def _read_bin(self, bin_fn, load_mm=False):
         with open(bin_fn, 'rb') as f:
             raw_data = f.read()
             data_tmp = np.frombuffer(raw_data, dtype=np.float64)
             if self.modality == 'mmwave':
+                data_tmp = data_tmp.copy().reshape(-1, 5)
+                #seems like 3 is intensity, 4 is velocity, flip them
+                data_tmp[:, [3, 4]] = data_tmp[:, [4, 3]]
+            elif load_mm:
                 data_tmp = data_tmp.copy().reshape(-1, 5)
                 data_tmp[:, [3, 4]] = data_tmp[:, [4, 3]]
             else:
@@ -503,41 +688,43 @@ class LiDARHuman26MPreprocessor(Preprocessor):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Preprocess dataset')
-    parser.add_argument('--dataset', type=str, default='milipoint', help='Dataset name')
-    parser.add_argument('--root_dir', type=str, help='Root directory of the dataset')
-    parser.add_argument('--out_dir', type=str, help='Output directory')
-    parser.add_argument('--seed', type=int, default=0, help='Random seed')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default='mmfi', choices=['mili', 'mmfi', 'mmbody', 'mri'])
+    parser.add_argument('--root_dir', type=str, default='/home/ryan/MM-Fi/MMFi_Dataset', help='Path to the root directory of the dataset')
+    parser.add_argument('--out_dir', type=str, default='/home/ryan/MM-Fi/LEMT/data_dual', help='Path to the output directory')
+    parser.add_argument('--modality', type=str, default='dual', choices=['mmwave', 'lidar', 'dual', 'raw_dual'])
     args = parser.parse_args()
 
-    if not os.path.exists(args.out_dir):
-        os.makedirs(args.out_dir)
-    np.random.seed(args.seed)
-    # Seeds used in original repos:
-    # milipoint: 42
-    # mmfi: 0
-    # mmbody: 35
-    # mri: 1234567891
-
-    dataset = args.dataset.lower()
-    if dataset == 'milipoint':
+    if args.dataset == 'mmfi':
+        preprocessor = MMFiPreprocessor(args.root_dir, args.out_dir, args.modality)
+    elif args.dataset == 'mili':
         preprocessor = MiliPointPreprocessor(args.root_dir, args.out_dir)
-    elif dataset == 'mmfi':
-        preprocessor = MMFiPreprocessor(args.root_dir, args.out_dir, 'mmwave')
-    elif dataset == 'mmfi_lidar':
-        preprocessor = MMFiPreprocessor(args.root_dir, args.out_dir, 'lidar')
-    elif dataset == 'mmbody':
+    elif args.dataset == 'mmbody':
         preprocessor = MMBodyPreprocessor(args.root_dir, args.out_dir)
-    elif dataset == 'mri':
+    elif args.dataset == 'mri':
         preprocessor = MRIPreprocessor(args.root_dir, args.out_dir)
-    elif dataset == 'itop_side':
+    elif args.dataset == 'itop_side':
         preprocessor = ITOPPreprocessor(args.root_dir, args.out_dir, 'side')
-    elif dataset == 'itop_top':
+    elif args.dataset == 'itop_top':
         preprocessor = ITOPPreprocessor(args.root_dir, args.out_dir, 'top')
-    elif dataset == 'lidarhuman26m':
+    elif args.dataset == 'lidarhuman26m':
         preprocessor = LiDARHuman26MPreprocessor(args.root_dir, args.out_dir)
     else:
         raise ValueError('Invalid dataset name')
     
     preprocessor.process()
+    #check the mmwave data of preprocessor's result for seq in preprocessor.results['sequences'][:2]:
+    # seq = preprocessor.results['sequences'][0]
+    # if 'mmwave_data' in seq:
+    #     #check the min, max of velocity and intensity of mmwave data
+    #     velocities = []
+    #     intensities = []
+    #     for mmwave in seq['mmwave_data']:
+    #         velocities.append(mmwave[:, 3])
+    #         intensities.append(mmwave[:, 4])
+    #     velocities = np.concatenate(velocities)
+    #     intensities = np.concatenate(intensities)
+    #     print(f'mmWave velocity: min {velocities.min()}, max {velocities.max()}')
+    #     print(f'mmWave intensity: min {intensities.min()}, max {intensities.max()}')
+        
     preprocessor.save()

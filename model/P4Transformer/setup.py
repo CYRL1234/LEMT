@@ -7,7 +7,16 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import glob
 import os
+import torch
+os.environ['CUDA_HOME'] = '/usr/local/cuda-12.0'
+print(os.environ.get('CUDA_HOME'))
+print(os.path.join('lib', 'x64'))
+print(torch.cuda._is_compiled())
+print("///////")
 
+print(torch.__version__)  # Check the PyTorch version
+print(torch.cuda.is_available())  # Check if CUDA is available
+print(torch.version.cuda)  # Check the CUDA version PyTorch was built with
 _ext_src_root = "_ext_src"
 _ext_sources = glob.glob("{}/src/*.cpp".format(_ext_src_root)) + glob.glob(
     "{}/src/*.cu".format(_ext_src_root)

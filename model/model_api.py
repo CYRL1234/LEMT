@@ -10,7 +10,7 @@ import pickle
 from model.metrics import calulate_error
 from misc.lr_scheduler import LinearWarmupCosineAnnealingLR
 from misc.utils import torch2numpy, import_with_str, delete_prefix_from_state_dict, exists_and_is_true
-from misc.skeleton import ITOPSkeleton, JOINT_COLOR_MAP
+from misc.skeleton import ITOPSkeleton, JOINT_COLOR_MAP, MMFiSkeleton
 from misc.vis import visualize_sample
 from loss.unsup import UnsupLoss
 
@@ -150,8 +150,23 @@ class LitModel(L.LightningModule):
             y_hat = y_hat_sup
 
         else:
+            # Get fusion mode from model params---
+            fusion_mode = self.hparams.model_params.get('fusion_mode', 'none')
+            #---
             x, y = batch['point_clouds'], batch['keypoints']
-            y_hat = self.model(x)
+            
+            #####Debug######
+            # print("fusion_mode:", fusion_mode)
+            #---
+            if fusion_mode == 'dual':
+                # Get mmwave data and ensure it exists
+                mm = batch.get('mmwave_data')
+                assert mm is not None, "fusion_mode=='dual' requires mmwave_data in batch"
+                y_hat = self.model(x, mm)  # Pass both inputs to model
+            else:
+            #---
+                y_hat = self.model(x)  # Original single-modality forward
+
             loss = self.loss_fn(y_hat, y)
             loss_dict = {'loss': loss.item()}
 
@@ -159,7 +174,7 @@ class LitModel(L.LightningModule):
     
     def _visualize(self, x, y, y_hat):
         sample = x[0][0][:, [0, 2, 1]], y[0][0][:, [0, 2, 1]], y_hat[0][0][:, [0, 2, 1]]
-        fig = visualize_sample(sample, edges=ITOPSkeleton.bones, point_size=2, joint_size=25, linewidth=2, padding=0.1)
+        fig = visualize_sample(sample, edges=MMFiSkeleton.bones, point_size=2, joint_size=25, linewidth=2, padding=0.1)
         tb = self.logger.experiment
         tb.add_figure('val_sample', fig, global_step=self.global_step)
         plt.close(fig)
@@ -168,7 +183,9 @@ class LitModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
         loss, loss_dict, y_hat = self._calculate_loss(batch)
-
+        #---
+        x = batch['point_clouds']
+        #---
         log_dict = {f'train_{k}': v for k, v in loss_dict.items()}
         x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
         mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
@@ -179,7 +196,15 @@ class LitModel(L.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
-        y_hat = self.model(x)
+        #---
+        # Add fusion mode handling
+        fusion_mode = self.hparams.model_params.get('fusion_mode', 'none')
+        if fusion_mode == 'dual':
+            mm = batch.get('mmwave_data')
+            assert mm is not None, "fusion_mode=='dual' requires mmwave_data in batch"
+            y_hat = self.model(x, mm)
+        else:
+            y_hat = self.model(x)
 
         x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
         mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
@@ -189,10 +214,29 @@ class LitModel(L.LightningModule):
 
         if batch_idx == 10:
             self._visualize(x_rec, y_rec, y_hat_rec)
+        #---
+        # y_hat = self.model(x)
+
+        # x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
+        # mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
+        # log_dict = {'val_mpjpe': mpjpe, 'val_pampjpe': pampjpe}
+
+        # self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
+
+        # if batch_idx == 10:
+        #     self._visualize(x_rec, y_rec, y_hat_rec)
 
     def test_step(self, batch, batch_idx):
         x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
-        y_hat = self.model(x)
+    
+        # Add fusion mode handling
+        fusion_mode = self.hparams.model_params.get('fusion_mode', 'none')
+        if fusion_mode == 'dual':
+            mm = batch.get('mmwave_data')
+            assert mm is not None, "fusion_mode=='dual' requires mmwave_data in batch"
+            y_hat = self.model(x, mm)
+        else:
+            y_hat = self.model(x)
 
         x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
         mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
@@ -202,6 +246,17 @@ class LitModel(L.LightningModule):
 
         if batch_idx == 10:
             self._visualize(x_rec, y_rec, y_hat_rec)
+        # x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
+        # y_hat = self.model(x)
+
+        # x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
+        # mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
+        # log_dict = {'test_mpjpe': mpjpe, 'test_pampjpe': pampjpe}
+
+        # self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
+
+        # if batch_idx == 10:
+        #     self._visualize(x_rec, y_rec, y_hat_rec)
 
     def predict_step(self, batch, batch_idx):
         x, c, r, si, gi = batch['point_clouds'], batch['centroid'], batch['radius'], batch['sequence_index'], batch['global_index']

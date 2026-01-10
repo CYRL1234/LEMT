@@ -12,8 +12,13 @@ class ToTensor():
         return torch.tensor([data], dtype=dtype)
 
     def __call__(self, sample):
-        for key in ['point_clouds', 'keypoints', 'centroid', 'translate', 'rotation_matrix']:
+        for key in ['point_clouds', 'keypoints', 'centroid', 'translate', 'rotation_matrix', 'mmwave_data']:
             if key in sample:
+                # print("Key: ", key, " Type: ", type(sample[key]))
+                if isinstance(sample[key], list):
+                    # Convert list to numpy array first
+                    sample[key] = np.array(sample[key])
+                # print( key,": ", type(sample[key]), len(sample[key]) )
                 sample[key] = self._array_to_tensor(sample[key])
 
         for key in ['action', 'sequence_index', 'index', 'global_index']:
