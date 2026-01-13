@@ -47,7 +47,7 @@ def plot_data(point_clouds, mmwave_data, keypoints, output_file):
     plt.close()  # Close the figure to free memory
 
 def main():
-    pkl_folder = '/home/ryan/MM-Fi/LEMT/data_dual/mmfi_dual.pkl'  # Change this to your folder path
+    pkl_folder = '/home/ryan/MM-Fi/LEMT/data_raw_dual/mmfi_raw_dual.pkl'  # Change this to your folder path
     case_name = 'case_1'  # Specify the case you want to check
     output_folder = '/home/ryan/MM-Fi/PcDisplay'  # Change this to your desired output folder
 
@@ -108,7 +108,7 @@ def main():
                 # if keypoints is not None:
                 #     keypoints = keypoints.dot(rotation_matrix.T)
                 # Define output file name
-                output_file = os.path.join(output_folder, f"{case_name}_frame_0.png")
+                output_file = os.path.join(output_folder, f"{case_name}_raw_dual_frame_0.png")
                 # print("Output file path:", output_file)
                 # Visualize and save the frame's data
                 # print("point_clouds shape:", point_clouds.shape)

@@ -149,6 +149,13 @@ class LitModel(L.LightningModule):
                          'loss_static': loss_static.item(), 'loss': loss.item()}
             y_hat = y_hat_sup
 
+        elif self.hparams.train_module == 'Human Localization Module':
+            mmwave_data = batch['mmwave_data']
+            # print(batch['keypoints'].shape)
+            y = batch['keypoints'][:, 0, 7, :] #batch['keypoints'] is shape (16,1,17,3)
+            y_hat = self.model(mmwave_data)
+            loss = self.loss_fn(y_hat, y)
+            loss_dict = {'loss': loss.item()}
         else:
             # Get fusion mode from model params---
             fusion_mode = self.hparams.model_params.get('fusion_mode', 'none')
@@ -173,7 +180,10 @@ class LitModel(L.LightningModule):
         return loss, loss_dict, y_hat
     
     def _visualize(self, x, y, y_hat):
-        sample = x[0][0][:, [0, 2, 1]], y[0][0][:, [0, 2, 1]], y_hat[0][0][:, [0, 2, 1]]
+        x_cpu = x.cpu()
+        y_cpu = y.cpu()
+        y_hat_cpu = y_hat.cpu()
+        sample = x_cpu[0][0][:, [0, 2, 1]], y_cpu[0][0][:, [0, 2, 1]], y_hat_cpu[0][0][:, [0, 2, 1]]
         fig = visualize_sample(sample, edges=MMFiSkeleton.bones, point_size=2, joint_size=25, linewidth=2, padding=0.1)
         tb = self.logger.experiment
         tb.add_figure('val_sample', fig, global_step=self.global_step)
@@ -187,9 +197,10 @@ class LitModel(L.LightningModule):
         x = batch['point_clouds']
         #---
         log_dict = {f'train_{k}': v for k, v in loss_dict.items()}
-        x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
-        mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
-        log_dict = {**log_dict, 'train_mpjpe': mpjpe, 'train_pampjpe': pampjpe}
+        if self.hparams.train_module == 'HPE Module':
+            x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
+            mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
+            log_dict = {**log_dict, 'train_mpjpe': mpjpe, 'train_pampjpe': pampjpe}
 
         self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
         return loss
@@ -203,72 +214,47 @@ class LitModel(L.LightningModule):
             mm = batch.get('mmwave_data')
             assert mm is not None, "fusion_mode=='dual' requires mmwave_data in batch"
             y_hat = self.model(x, mm)
-        else:
-            y_hat = self.model(x)
-
-        x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
-        mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
-        log_dict = {'val_mpjpe': mpjpe, 'val_pampjpe': pampjpe}
+        loss, loss_dict, y_hat = self._calculate_loss(batch)
+        log_dict = {f'val_{k}': v for k, v in loss_dict.items()}
+        if self.hparams.train_module == 'HPE Module':
+            x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
+            mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
+            log_dict = {**log_dict, 'val_mpjpe': mpjpe, 'val_pampjpe': pampjpe}
+            if batch_idx == 0 and self.hparams.train_module == 'HPE Module':
+                self._visualize(x, y, y_hat)
 
         self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
-
-        if batch_idx == 10:
-            self._visualize(x_rec, y_rec, y_hat_rec)
-        #---
-        # y_hat = self.model(x)
-
-        # x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
-        # mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
-        # log_dict = {'val_mpjpe': mpjpe, 'val_pampjpe': pampjpe}
-
-        # self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
-
-        # if batch_idx == 10:
-        #     self._visualize(x_rec, y_rec, y_hat_rec)
+        return loss
 
     def test_step(self, batch, batch_idx):
         x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
-    
-        # Add fusion mode handling
-        fusion_mode = self.hparams.model_params.get('fusion_mode', 'none')
-        if fusion_mode == 'dual':
-            mm = batch.get('mmwave_data')
-            assert mm is not None, "fusion_mode=='dual' requires mmwave_data in batch"
-            y_hat = self.model(x, mm)
-        else:
-            y_hat = self.model(x)
-
-        x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
-        mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
-        log_dict = {'test_mpjpe': mpjpe, 'test_pampjpe': pampjpe}
+        loss, loss_dict, y_hat = self._calculate_loss(batch)
+        log_dict = {f'test_{k}': v for k, v in loss_dict.items()}
+        if self.hparams.train_module == 'HPE Module':
+            x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
+            mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
+            log_dict = {**log_dict, 'test_mpjpe': mpjpe, 'test_pampjpe': pampjpe}
 
         self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
+        return loss
 
-        if batch_idx == 10:
-            self._visualize(x_rec, y_rec, y_hat_rec)
-        # x, y, c, r = batch['point_clouds'], batch['keypoints'], batch['centroid'], batch['radius']
-        # y_hat = self.model(x)
-
-        # x_rec, y_rec, y_hat_rec = self._recover_all(x, y, y_hat, c, r)
-        # mpjpe, pampjpe = calulate_error(y_hat_rec, y_rec)
-        # log_dict = {'test_mpjpe': mpjpe, 'test_pampjpe': pampjpe}
-
-        # self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
-
-        # if batch_idx == 10:
-        #     self._visualize(x_rec, y_rec, y_hat_rec)
-
-    def predict_step(self, batch, batch_idx):
-        x, c, r, si, gi = batch['point_clouds'], batch['centroid'], batch['radius'], batch['sequence_index'], batch['global_index']
-        y_hat = self.model(x)
-        y_hat = self._recover_data(y_hat, c, r)
-        return y_hat, si, gi
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        x, c, r = batch['point_clouds'], batch['centroid'], batch['radius']
+        if self.hparams.train_module == 'Human Localization Module':
+            mmwave_data = batch['mmwave_data']
+            y_hat = self.model(mmwave_data)
+        else:
+            y_hat = self.model(x)
+        _, _, y_hat_rec = self._recover_all(x, y_hat, y_hat, c, r)
+        return y_hat_rec
 
     def configure_optimizers(self):
-        if exists_and_is_true(self.hparams, 'lemt'):
-            all_params = list(self.model.parameters()) + list(self.model_teacher.parameters())
+        optim_params = self.hparams.optim_params if self.hparams.optim_params is not None else {}
+        optimizer = create_optimizer(self.hparams.optim_name, optim_params, self.model.parameters())
+
+        if self.hparams.sched_name is None:
+            return optimizer
         else:
-            all_params = self.model.parameters()
-        optimizer = create_optimizer(self.hparams.optim_name, self.hparams.optim_params, all_params)
-        scheduler = create_scheduler(self.hparams.sched_name, self.hparams.sched_params, optimizer)
-        return [optimizer], [scheduler]
+            sched_params = self.hparams.sched_params if self.hparams.sched_params is not None else {}
+            scheduler = create_scheduler(self.hparams.sched_name, sched_params, optimizer)
+            return [optimizer], [scheduler]
