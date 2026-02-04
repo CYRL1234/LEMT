@@ -49,50 +49,117 @@ class AddPointsAroundJoint():
         return sample
     
 class RemoveOutliers():
-    def __init__(self, outlier_type='statistical', num_neighbors=3, std_multiplier=1.0, radius=1.0, min_neighbors=2):
+    def __init__(self, outlier_type='statistical', num_neighbors=3, std_multiplier=1.0, radius=1.0, min_neighbors=2, data_type='pointcloud'):
         self.outlier_type = outlier_type
         self.num_neighbors = num_neighbors
         self.std_multiplier = std_multiplier
         self.radius = radius
         self.min_neighbors = min_neighbors
+        self.data_type = data_type
         if outlier_type not in ['statistical', 'radius', 'cluster', 'box']:
             raise ValueError('outlier_type must be "statistical" or "radius" or "cluster" or "box"')
 
     def __call__(self, sample):
-        for i in range(len(sample['point_clouds'])):
+        if self.data_type == 'pointcloud':
+            data_key = 'point_clouds'
+        elif self.data_type == 'mmwave':
+            data_key = 'mmwave_data'
+        for i in range(len(sample[data_key])):
+            if sample[data_key][i] is None or sample[data_key][i].shape[0] == 0:
+                continue
 
             if self.outlier_type == 'statistical':
-                neighbors = NearestNeighbors(n_neighbors=self.num_neighbors+1).fit(sample['point_clouds'][i][...,:3])
-                distances, _ = neighbors.kneighbors(sample['point_clouds'][i][...,:3])
+                neighbors = NearestNeighbors(n_neighbors=self.num_neighbors+1).fit(sample[data_key][i][...,:3])
+                distances, _ = neighbors.kneighbors(sample[data_key][i][...,:3])
                 mean_dist = np.mean(distances[:, 1:], axis=1)
                 std_dist = np.std(distances[:, 1:], axis=1)
                 dist_threshold = mean_dist + self.std_multiplier * std_dist
                 inliers = np.where(distances[:, 1:] < dist_threshold[:, np.newaxis])
 
             elif self.outlier_type == 'radius':
-                neighbors = NearestNeighbors(radius=self.radius).fit(sample['point_clouds'][i][...,:3])
-                distances, _ = neighbors.radius_neighbors(sample['point_clouds'][i][...,:3], return_distance=True)
+                neighbors = NearestNeighbors(radius=self.radius).fit(sample[data_key][i][...,:3])
+                distances, _ = neighbors.radius_neighbors(sample[data_key][i][...,:3], return_distance=True)
                 inliers = np.where([len(d) >= self.min_neighbors for d in distances])
 
             elif self.outlier_type == 'cluster':
                 clusterer = DBSCAN(min_samples=self.min_neighbors)
-                inliers = clusterer.fit_predict(sample['point_clouds'][i][...,:3]) != -1
+                inliers = clusterer.fit_predict(sample[data_key][i][...,:3]) != -1
                 if np.sum(inliers) == 0:
                     inliers[0] = True
 
+            # elif self.outlier_type == 'box':
+            #     inliers = np.where(np.all(np.abs(sample[data_key][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
+            #     if 'mmwave_data' in sample:
+            #         inliers_mmwave = np.where(np.all(np.abs(sample['mmwave_data'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
+            #         sample['mmwave_data'][i] = sample['mmwave_data'][i][inliers_mmwave]
+            
+            # else:
+            #     raise ValueError('You should never reach here!')
+            
+            # if len(inliers[0]) == 0:
+            #     sample[data_key][i] = sample[data_key][i][:1]
+            # else:
+            #     sample[data_key][i] = sample[data_key][i][inliers]
             elif self.outlier_type == 'box':
-                inliers = np.where(np.all(np.abs(sample['point_clouds'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
-                if 'mmwave_data' in sample:
-                    inliers_mmwave = np.where(np.all(np.abs(sample['mmwave_data'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1))
-                    sample['mmwave_data'][i] = sample['mmwave_data'][i][inliers_mmwave]
+                mask = np.all(np.abs(sample[data_key][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1)
+                inliers = np.where(mask)[0]
+                if data_key != 'mmwave_data' and 'mmwave_data' in sample:
+                    mm_mask = np.all(np.abs(sample['mmwave_data'][i][...,:2] - np.array([[0, 1]])) < self.radius, axis=1)
+                    sample['mmwave_data'][i] = sample['mmwave_data'][i][mm_mask]
             
             else:
                 raise ValueError('You should never reach here!')
             
-            if len(inliers[0]) == 0:
-                sample['point_clouds'][i] = sample['point_clouds'][i][:1]
+            if isinstance(inliers, tuple):
+                inliers = inliers[0]
+
+            if len(inliers) == 0:
+                if sample[data_key][i].shape[0] == 0:
+                    continue
+                sample[data_key][i] = sample[data_key][i][:1]
             else:
-                sample['point_clouds'][i] = sample['point_clouds'][i][inliers]
+                sample[data_key][i] = sample[data_key][i][inliers]
+
+        return sample
+
+class RemoveFloor():
+    def __init__(self, buffer=0.1):
+        self.buffer = buffer
+
+    def __call__(self, sample):
+        if 'point_clouds' not in sample:
+            return sample
+
+        new_pcs = []
+        for i in range(len(sample['point_clouds'])):
+            pc = sample['point_clouds'][i]
+            if pc is None or pc.shape[0] == 0:
+                new_pcs.append(pc)
+                continue
+            min_y = np.min(pc[:, 1])
+            threshold = min_y + self.buffer
+            filtered = pc[pc[:, 1] >= threshold]
+            if filtered.shape[0] == 0:
+                filtered = pc[:1]
+            new_pcs.append(filtered)
+
+        sample['point_clouds'] = new_pcs
+
+        # Apply the same floor removal to mmWave if present
+        if 'mmwave_data' in sample:
+            new_mms = []
+            for i in range(len(sample['mmwave_data'])):
+                mm = sample['mmwave_data'][i]
+                if mm is None or mm.shape[0] == 0:
+                    new_mms.append(mm)
+                    continue
+                min_y = np.min(mm[:, 1])
+                threshold = min_y + self.buffer
+                filtered = mm[mm[:, 1] >= threshold]
+                if filtered.shape[0] == 0:
+                    filtered = mm[:1]
+                new_mms.append(filtered)
+            sample['mmwave_data'] = new_mms
 
         return sample
 
@@ -333,36 +400,82 @@ class RandomDrop():
         return sample
     
 class GetCentroid():
-    def __init__(self, centroid_type='minball'):
+    def __init__(self, centroid_type='minball', data_type='pointcloud'):
         self.centroid_type = centroid_type
-        if centroid_type not in ['none', 'zonly', 'mean', 'median', 'minball', 'dataset_median', 'kps', 'xz']:
+        self.data_type = data_type
+        if centroid_type not in ['none', 'zonly', 'mean', 'median', 'minball', 'dataset_median', 'kps', 'xz', 'lidar_human']:
             raise ValueError('centroid_type must be "mean" or "minball"')
         
     def __call__(self, sample):
-        pc_cat = np.concatenate(sample['point_clouds'], axis=0)
-        pc_dedupe = np.unique(pc_cat[...,:3], axis=0)
-        if self.centroid_type == 'none':
-            centroid = np.zeros(3)
-        elif self.centroid_type == 'zonly':
-            centroid = np.zeros(3)
-            centroid[2] = np.median(pc_dedupe[...,2])
-        elif self.centroid_type == 'mean':
-            centroid = np.mean(pc_dedupe[...,:3], axis=0)
-        elif self.centroid_type == 'median':
-            centroid = np.median(pc_dedupe[...,:3], axis=0)
-        elif self.centroid_type == 'minball':
-            try:
-                centroid, _ = get_bounding_ball(pc_dedupe)
-            except:
-                print('Error in minball')
+        if self.data_type == 'pointcloud':
+            pc_cat = np.concatenate(sample['point_clouds'], axis=0)
+            pc_dedupe = np.unique(pc_cat[...,:3], axis=0)
+            pc_dedupe = pc_dedupe[np.all(np.isfinite(pc_dedupe), axis=1)]
+            if pc_dedupe.shape[0] == 0:
+                sample['centroid'] = np.zeros(3)
+                return sample
+            if self.centroid_type == 'none':
+                centroid = np.zeros(3)
+            elif self.centroid_type == 'zonly':
+                centroid = np.zeros(3)
+                centroid[2] = np.median(pc_dedupe[...,2])
+            elif self.centroid_type == 'mean':
                 centroid = np.mean(pc_dedupe[...,:3], axis=0)
-        elif self.centroid_type == 'kps':
-            kps_cat = np.concatenate(sample['keypoints'], axis=0)
-            centroid = np.array([np.median(kps_cat[:, 0]), np.min(kps_cat[:, 1]), np.median(kps_cat[:, 2])])
-        elif self.centroid_type == 'xz':
-            centroid = np.array([np.median(pc_dedupe[:, 0]), 0, np.median(pc_dedupe[:, 2])])
+            elif self.centroid_type == 'median':
+                centroid = np.median(pc_dedupe[...,:3], axis=0)
+            elif self.centroid_type == 'minball':
+                try:
+                    centroid, _ = get_bounding_ball(pc_dedupe)
+                except:
+                    print('Error in minball')
+                    centroid = np.mean(pc_dedupe[...,:3], axis=0)
+            elif self.centroid_type == 'kps':
+                kps_cat = np.concatenate(sample['keypoints'], axis=0)
+                centroid = np.array([np.median(kps_cat[:, 0]), np.min(kps_cat[:, 1]), np.median(kps_cat[:, 2])])
+            elif self.centroid_type == 'lidar_human':
+                lidar_cat = np.concatenate(sample['point_clouds'], axis=0)
+                lidar_dedupe = np.unique(lidar_cat[...,:3], axis=0)
+                lidar_dedupe = lidar_dedupe[np.all(np.isfinite(lidar_dedupe), axis=1)]
+                if lidar_dedupe.shape[0] == 0:
+                    centroid = np.zeros(3)
+                else:
+                    centroid = np.array([np.median(lidar_dedupe[:, 0]), np.min(lidar_dedupe[:, 1]), np.median(lidar_dedupe[:, 2])])
+            elif self.centroid_type == 'xz':
+                centroid = np.array([np.median(pc_dedupe[:, 0]), 0, np.median(pc_dedupe[:, 2])])
+            else:
+                raise ValueError('You should never reach here! centroid_type must be "mean" or "minball"')
+        elif self.data_type == 'mmwave':
+            mm_cat = np.concatenate(sample['mmwave_data'], axis=0)
+            mm_dedupe = np.unique(mm_cat[...,:3], axis=0)
+            mm_dedupe = mm_dedupe[np.all(np.isfinite(mm_dedupe), axis=1)]
+            if mm_dedupe.shape[0] == 0:
+                sample['centroid'] = np.zeros(3)
+                return sample
+            if self.centroid_type == 'none':
+                centroid = np.zeros(3)
+            elif self.centroid_type == 'zonly':
+                centroid = np.zeros(3)
+                centroid[2] = np.median(mm_dedupe[...,2])
+            elif self.centroid_type == 'mean':
+                centroid = np.mean(mm_dedupe[...,:3], axis=0)
+            elif self.centroid_type == 'median':
+                centroid = np.median(mm_dedupe[...,:3], axis=0)
+            elif self.centroid_type == 'minball':
+                try:
+                    centroid, _ = get_bounding_ball(mm_dedupe)
+                except:
+                    print('Error in minball')
+                    centroid = np.mean(mm_dedupe[...,:3], axis=0)
+            elif self.centroid_type == 'kps':
+                kps_cat = np.concatenate(sample['keypoints'], axis=0)
+                centroid = np.array([np.median(kps_cat[:, 0]), np.min(kps_cat[:, 1]), np.median(kps_cat[:, 2])])
+            elif self.centroid_type == 'xz':
+                centroid = np.array([np.median(mm_dedupe[:, 0]), 0, np.median(mm_dedupe[:, 2])])
+            else:
+                raise ValueError('You should never reach here! centroid_type must be "mean" or "minball"')
         else:
-            raise ValueError('You should never reach here! centroid_type must be "mean" or "minball"')
+            raise ValueError('data_type must be "pointcloud" or "mmwave"')
+        
         sample['centroid'] = centroid
 
         return sample
@@ -380,6 +493,14 @@ class Normalize():
                 sample['point_clouds'][i][...,3:] /= np.array(self.feat_scale)[np.newaxis][np.newaxis]
                 sample['mmwave_data'][i][...,3:] /= np.array(self.feat_scale)[np.newaxis][np.newaxis]
                 sample['feat_scale'] = self.feat_scale
+        
+        if 'raw_point_clouds' in sample:
+            for i in range(len(sample['raw_point_clouds'])):
+                sample['raw_point_clouds'][i][...,:3] -= sample['centroid'][np.newaxis]
+
+        if 'raw_mmwave_data' in sample:
+            for i in range(len(sample['raw_mmwave_data'])):
+                sample['raw_mmwave_data'][i][...,:3] -= sample['centroid'][np.newaxis]
         if 'keypoints' in sample:
             sample['keypoints'] -= sample['centroid'][np.newaxis][np.newaxis]
         return sample
@@ -421,6 +542,21 @@ class FeatureTransfer():
                 pc_xyz = sample['point_clouds'][i][...,:3]
                 mmwave_xyz = sample['mmwave_data'][i][...,:3]
                 mmwave_feat = sample['mmwave_data'][i][...,self.feature_idx]
+
+                if pc_xyz.shape[0] == 0:
+                    num_points = sample['point_clouds'][i].shape[0]
+                    empty_feat = np.zeros((num_points, len(self.feature_idx)))
+                    new_pc = np.concatenate([sample['point_clouds'][i], empty_feat], axis=1)
+                    new_pcs.append(new_pc)
+                    continue
+
+                if mmwave_xyz.shape[0] == 0:
+                    num_points = sample['point_clouds'][i].shape[0]
+                    empty_feat = np.zeros((num_points, len(self.feature_idx)))
+                    new_pc = np.concatenate([sample['point_clouds'][i], empty_feat], axis=1)
+                    new_pcs.append(new_pc)
+                    continue
+
                 all_xyz = np.concatenate([pc_xyz, mmwave_xyz], axis=0)
 
                 # find the vertices of the bounding cube of all points
@@ -462,5 +598,147 @@ class FeatureTransfer():
                 # fallback: heterogeneous frames -> ndarray of objects
                 # print('Warning: heterogeneous point cloud sizes after mmwave feature transfer; using object array.')
                 sample['point_clouds'] = np.array(new_pcs, dtype=object)
+
+            return sample
+    
+
+class RawFeatureTransfer():
+    def __init__(self, feature_idx=[3,4,5], knn_k=3, transfer_type='empty'):
+        self.feature_idx = feature_idx
+        self.knn_k = knn_k
+        self.transfer_type = transfer_type
+
+    def __call__(self, sample):
+        # This transform operates on the raw data before other augmentations
+        source_pc_key = 'raw_point_clouds'
+        source_mm_key = 'raw_mmwave_data'
+
+        # ensure we can replace per-frame arrays with larger-feature arrays
+        if isinstance(sample[source_pc_key], np.ndarray):
+            sample[source_pc_key] = [pc for pc in sample[source_pc_key]]
+        
+        #ensure valid transfer type
+        if self.transfer_type not in ['mmwave', 'empty']:
+            raise ValueError('invalid transfer_type"')
+        
+        # if transfer empty features
+        if self.transfer_type == 'empty':
+            new_pcs = []
+            for i in range(len(sample[source_pc_key])):
+                num_points = sample[source_pc_key][i].shape[0]
+                empty_feat = np.zeros((num_points, len(self.feature_idx)))
+                new_pc = np.concatenate([sample[source_pc_key][i], empty_feat], axis=1)
+                new_pcs.append(new_pc)
+            sample[source_pc_key] = new_pcs
+            return sample
+
+        # # if transfer mmwave features
+        # if self.transfer_type == 'mmwave':
+        #     new_pcs = []
+        #     for i in range(len(sample[source_pc_key])):
+        #         # Skip if there are no points to process
+        #         if sample[source_pc_key][i].shape[0] == 0:
+        #             # Add empty feature columns to match expected dimensions
+        #             num_feat_to_add = len(self.feature_idx)
+        #             current_feats = sample[source_pc_key][i].shape[1]
+        #             new_pc = np.zeros((0, current_feats + num_feat_to_add))
+        #             new_pcs.append(new_pc)
+        #             continue
+
+        #         pc_xyz = sample[source_pc_key][i][...,:3]
+        #         mmwave_xyz = sample[source_mm_key][i][...,:3]
+        #         mmwave_feat = sample[source_mm_key][i][...,self.feature_idx]
+                
+        #         # Skip if mmwave data is empty
+        #         if mmwave_xyz.shape[0] == 0:
+        #             num_points = sample[source_pc_key][i].shape[0]
+        #             empty_feat = np.zeros((num_points, len(self.feature_idx)))
+        #             new_pc = np.concatenate([sample[source_pc_key][i], empty_feat], axis=1)
+        #             new_pcs.append(new_pc)
+        #             continue
+
+        #         all_xyz = np.concatenate([pc_xyz, mmwave_xyz], axis=0)
+
+        #         # find the vertices of the bounding cube of all points
+        #         min_xyz = np.min(all_xyz, axis=0)
+        #         max_xyz = np.max(all_xyz, axis=0)
+
+        #         # expand the cube a bit
+        #         expand_ratio = 0.1
+        #         min_xyz = min_xyz - (max_xyz - min_xyz) * expand_ratio
+        #         max_xyz = max_xyz + (max_xyz - min_xyz) * expand_ratio
+
+        #         # add 0 doppler speed and intensity to the vertices
+        #         cube_vertices = np.array([[min_xyz[0], min_xyz[1], min_xyz[2]],
+        #                                 [min_xyz[0], min_xyz[1], max_xyz[2]],
+        #                                 [min_xyz[0], max_xyz[1], min_xyz[2]],
+        #                                 [min_xyz[0], max_xyz[1], max_xyz[2]],
+        #                                 [max_xyz[0], min_xyz[1], min_xyz[2]],
+        #                                 [max_xyz[0], min_xyz[1], max_xyz[2]],
+        #                                 [max_xyz[0], max_xyz[1], min_xyz[2]],
+        #                                 [max_xyz[0], max_xyz[1], max_xyz[2]]])
+        #         cube_vertex_feat = np.zeros((8, len(self.feature_idx)))
+        #         mmwave_xyz = np.concatenate([mmwave_xyz, cube_vertices], axis=0)
+        #         mmwave_feat = np.concatenate([mmwave_feat, cube_vertex_feat], axis=0)
+
+        #         neighbors = NearestNeighbors(n_neighbors=self.knn_k).fit(mmwave_xyz)
+        #         distances, indices = neighbors.kneighbors(pc_xyz)
+
+        #         weights = 1 / (distances + 1e-8)
+        #         weights = weights / np.sum(weights, axis=1, keepdims=True)
+
+        #         transferred_feat = np.sum(mmwave_feat[indices] * weights[..., np.newaxis], axis=1)
+        #         new_pc = np.concatenate([sample[source_pc_key][i], transferred_feat], axis=1)
+        #         new_pcs.append(new_pc)
+
+        #     sample[source_pc_key] = new_pcs
+        #     return sample
+        if self.transfer_type == 'mmwave':
+            new_pcs = []
+            for i in range(len(sample[source_pc_key])):
+                pc_xyz = sample[source_pc_key][i][...,:3]
+                mmwave_xyz = sample[source_mm_key][i][...,:3]
+                mmwave_feat = sample[source_mm_key][i][...,self.feature_idx]
+                all_xyz = np.concatenate([pc_xyz, mmwave_xyz], axis=0)
+
+                # find the vertices of the bounding cube of all points
+                min_xyz = np.min(all_xyz, axis=0)
+                max_xyz = np.max(all_xyz, axis=0)
+
+                # expand the cube a bit
+                expand_ratio = 0.1
+                min_xyz = min_xyz - (max_xyz - min_xyz) * expand_ratio
+                max_xyz = max_xyz + (max_xyz - min_xyz) * expand_ratio
+
+                # add 0 doppler speed and intensity to the vertices
+                cube_vertices = np.array([[min_xyz[0], min_xyz[1], min_xyz[2]],
+                                        [min_xyz[0], min_xyz[1], max_xyz[2]],
+                                        [min_xyz[0], max_xyz[1], min_xyz[2]],
+                                        [min_xyz[0], max_xyz[1], max_xyz[2]],
+                                        [max_xyz[0], min_xyz[1], min_xyz[2]],
+                                        [max_xyz[0], min_xyz[1], max_xyz[2]],
+                                        [max_xyz[0], max_xyz[1], min_xyz[2]],
+                                        [max_xyz[0], max_xyz[1], max_xyz[2]]])
+                cube_vertex_feat = np.zeros((8, len(self.feature_idx)))
+                mmwave_xyz = np.concatenate([mmwave_xyz, cube_vertices], axis=0)
+                mmwave_feat = np.concatenate([mmwave_feat, cube_vertex_feat], axis=0)
+
+                neighbors = NearestNeighbors(n_neighbors=self.knn_k).fit(mmwave_xyz)
+                distances, indices = neighbors.kneighbors(pc_xyz)
+
+                weights = 1 / (distances + 1e-8)
+                weights = weights / np.sum(weights, axis=1, keepdims=True)
+
+                transferred_feat = np.sum(mmwave_feat[indices] * weights[..., np.newaxis], axis=1)
+                new_pc = np.concatenate([sample[source_pc_key][i], transferred_feat], axis=1)
+                new_pcs.append(new_pc)
+                # sample['point_clouds'][i] = np.concatenate([sample['point_clouds'][i], transferred_feat], axis=1)
+            # sample['point_clouds'] = new_pcs
+            try:
+                sample[source_pc_key] = np.stack(new_pcs)
+            except ValueError:
+                # fallback: heterogeneous frames -> ndarray of objects
+                # print('Warning: heterogeneous point cloud sizes after mmwave feature transfer; using object array.')
+                sample[source_pc_key] = np.array(new_pcs, dtype=object)
 
             return sample

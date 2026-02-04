@@ -1,0 +1,56 @@
+strategy: ddp
+benchmark: True
+pretrained: False
+sync_batchnorm: False
+clip_grad: null
+precision: 16
+#original 100
+epochs: &epochs 30
+
+# --------------------------------------
+# Model parameters
+# --------------------------------------
+# mode: train
+localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_new/HumanLocalizeP4Transformer-epoch=16-val_loss=0.0065.ckpt
+localization_model_name: HumanLocalizeP4Transformer
+localization_model_params:
+  radius: 0.7
+  nsamples: 32
+  spatial_stride: 8
+  temporal_kernel_size: 3
+  temporal_stride: 1
+  emb_relu: false
+  dim: 1024
+  depth: 5
+  heads: 8
+  dim_head: 128
+  mlp_dim: 2048
+  output_dim: 3
+  features: 3
+
+# --------------------------------------
+# Model parameters
+# --------------------------------------
+# mode: train
+model_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/roi_bg_128/P4Transformer-epoch=23-val_mpjpe=0.0618.ckpt
+model_name: P4Transformer
+model_params:
+  fusion_mode: 'none'     # Options: 'none', 'dual'
+  fusion_type: 'late'    # Options: 'early', 'late'
+  lidar_features: 3       # (),() for LiDAR
+  mmwave_features: 2      # doppler + intensity for mmWave
+  radius: 0.7
+  nsamples: 32
+  spatial_stride: 8
+  temporal_kernel_size: 3
+  temporal_stride: 1
+  emb_relu: false
+  dim: 1024
+  depth: 5
+  heads: 8
+  dim_head: 128
+  mlp_dim: 2048
+  output_dim: 51
+  features: 3
+  lidar_weight: 1.0
+  mmwave_weight: 0.5

@@ -1,0 +1,29 @@
+# --------------------------------------
+# Preprocess arguments
+# --------------------------------------
+dataset: mmfi
+root_dir: /home/ryan/MM-Fi/MMFi_Dataset
+out_dir: /home/ryan/MM-Fi/LEMT/data_roi_bg
+modality: roi_bg_dual
+
+# --------------------------------------
+# Localization model parameters
+# --------------------------------------
+localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_new/HumanLocalizeP4Transformer-epoch=16-val_loss=0.0065.ckpt
+localization_model_name: HumanLocalizeP4Transformer
+localization_model_params:
+  radius: 0.7
+  nsamples: 32
+  spatial_stride: 8
+  temporal_kernel_size: 3
+  temporal_stride: 1
+  emb_relu: false
+  dim: 1024
+  depth: 5
+  heads: 8
+  dim_head: 128
+  mlp_dim: 2048
+  output_dim: 3
+  features: 3
+
+

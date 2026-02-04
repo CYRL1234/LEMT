@@ -1,0 +1,209 @@
+# @package _global_
+
+# --- Core Training Parameters (from base configs) ---
+strategy: ddp
+benchmark: True
+pretrained: False
+sync_batchnorm: False
+clip_grad: null
+precision: 16
+epochs: &epochs 30
+# gpus: 1
+# num_nodes: 1
+# num_workers: 4
+# batch_size: 16
+# batch_size_eva: 16
+# pin_memory: True
+# train_module: 'Cascaded HPE Module'
+
+# --- Pre-trained Localization Model ---
+localization_checkpoint: "/home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/Human Localization Module/HumanLocalizeP4Transformer-epoch=2-val_loss=0.0118.ckpt"
+
+# --- Logging ---
+exp_name: 'mmfi_cascaded_p4t'
+version: '0'
+
+# --- Optimizer (from HPE config) ---
+optim_name: AdamW
+optim_params:
+  lr: 0.0001
+  weight_decay: 0.00001
+
+# --- Scheduler (from HPE config) ---
+sched_name: CosineAnnealingWarmRestarts
+sched_params:
+  T_0: 6
+  eta_min: 1.0e-06
+
+# --- Loss Function for HPE ---
+loss_name: 'MSELoss'
+loss_params: null
+
+# --- HPE Model (P4Transformer from mmfi_feature_fusion.yml) ---
+model_name: 'P4Transformer'
+model_params:
+  fusion_mode: 'none'
+  fusion_type: 'late'
+  lidar_features: 3
+  mmwave_features: 2
+  radius: 0.7
+  nsamples: 32
+  spatial_stride: 8
+  temporal_kernel_size: 3
+  temporal_stride: 1
+  emb_relu: false
+  dim: 1024
+  depth: 5
+  heads: 8
+  dim_head: 128
+  mlp_dim: 2048
+  output_dim: 51 # 17 joints * 3 coords
+  features: 3
+  lidar_weight: 1.0
+  mmwave_weight: 0.5
+
+# --- Localization Model (from mmfi_human_localization.yml) ---
+localization_model_name: 'HumanLocalizeP4Transformer'
+localization_model_params:
+  radius: 0.7
+  nsamples: 32
+  spatial_stride: 8
+  temporal_kernel_size: 3
+  temporal_stride: 1
+  emb_relu: false
+  dim: 1024
+  depth: 5
+  heads: 8
+  dim_head: 128
+  mlp_dim: 2048
+  output_dim: 3 # x,y,z for location
+  features: 3 # As per localization config
+
+# --- Dataset (from mmfi_human_localization.yml) ---
+train_dataset:
+  name: BaseDataset
+  params:
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_raw_dual/mmfi_raw_dual.pkl
+    split: [train_rdn_p3, val_rdn_p3]
+val_dataset:
+  name: BaseDataset
+  params:
+    data_path: *data_path
+    split: test_rdn_p3
+test_dataset:
+  name: BaseDataset
+  params:
+    data_path: *data_path
+    split: test_rdn_p3
+
+# --- Augmentation Pipelines (match mmfi_feature_fusion.yml) ---
+train_pipeline:
+  - name: UniformSample
+    params: 
+      pad_type: 'start'
+      clip_len: 5
+  - name: GetCentroid
+    params: 
+      centroid_type: 'lidar_human'
+  - name: Normalize
+    params:
+      feat_scale: null
+  - name: RemoveOutliers
+    params: 
+      outlier_type: 'box'
+      radius: 1.5
+  - name: RemoveOutliers
+    params:
+      outlier_type: 'radius'
+      radius: 0.15
+      min_neighbors: 3
+  - name: ReduceKeypointLen
+    params:
+      only_one: true
+      keep_type: 'end'
+      frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
+  - name: Pad
+    params:
+      max_len: 128
+      mm_len: 128
+  - name: ToTensor
+    params: null
+
+val_pipeline: &val_pipeline
+  - name: UniformSample
+    params:
+      pad_type: 'start'
+      clip_len: 5
+  - name: GetCentroid
+    params: 
+      centroid_type: 'lidar_human'
+  - name: Normalize
+    params:
+      feat_scale: null
+  - name: RemoveOutliers
+    params: 
+      outlier_type: 'box'
+      radius: 1.5
+  - name: RemoveOutliers
+    params:
+      outlier_type: 'radius'
+      radius: 0.15
+      min_neighbors: 3
+  - name: ReduceKeypointLen
+    params:
+      only_one: true
+      keep_type: 'end'
+      frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
+  - name: Pad
+    params:
+      max_len: 128
+      mm_len: 128
+  - name: ToTensor
+    params: null
+
+test_pipeline:
+  - name: UniformSample
+    params:
+      pad_type: 'start'
+      clip_len: 5
+  - name: GetCentroid
+    params: 
+      centroid_type: 'lidar_human'
+  - name: Normalize
+    params:
+      feat_scale: null
+  - name: RemoveOutliers
+    params: 
+      outlier_type: 'box'
+      radius: 1.5
+  - name: RemoveOutliers
+    params:
+      outlier_type: 'radius'
+      radius: 0.15
+      min_neighbors: 3
+  - name: ReduceKeypointLen
+    params:
+      only_one: true
+      keep_type: 'end'
+      frame_to_reduce: 0
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
+  - name: Pad
+    params:
+      max_len: 128
+      mm_len: 128
+  - name: ToTensor
+    params: null

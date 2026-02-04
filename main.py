@@ -93,6 +93,42 @@ def main(args):
             precision=args.precision,
             benchmark=args.benchmark
     )
+    elif args.train_module == 'Cascaded HPE Module':
+        dm = LitDataModule(hparams=args)
+        model = LitModel(hparams=args)
+        monitor = 'val_mpjpe'
+        filename = args.model_name+'-{epoch}-{val_mpjpe:.4f}'
+
+        callbacks = [
+            ModelCheckpoint(
+                monitor=monitor,
+                dirpath=os.path.join(log_dir, args.exp_name, args.version),
+                filename=filename,
+                save_top_k=1,
+                save_last=True,
+                mode='min'),
+            RichProgressBar(refresh_rate=20)
+        ]
+
+        logger = TensorBoardLogger(save_dir=log_dir, 
+                                name=args.exp_name,
+                                version=args.version)
+        logger.log_hyperparams(args)
+
+        trainer = L.Trainer(
+            fast_dev_run=args.dev,
+            logger=logger,
+            max_epochs=args.epochs,
+            devices=1 if args.predict else args.gpus,
+            accelerator="gpu",
+            sync_batchnorm=args.sync_batchnorm,
+            num_nodes=args.num_nodes,
+            gradient_clip_val=args.clip_grad,
+            strategy=DDPStrategy(find_unused_parameters=False) if args.strategy == 'ddp' else args.strategy,
+            callbacks=callbacks,
+            precision=args.precision,
+            benchmark=args.benchmark
+    )
 
     if bool(args.test):
         trainer.test(model, datamodule=dm)

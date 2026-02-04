@@ -46,17 +46,36 @@ class BaseDataset(Dataset):
         sample['translate'] = np.array([0.,0.,0.])
         sample['rotation_matrix'] = np.eye(3)
 
-        sample = self.transform(sample)
+        # Store raw data before augmentation
+        if 'point_clouds' in sample:
+            sample['raw_point_clouds'] = deepcopy(sample['point_clouds'])
+        if 'mmwave_data' in sample:
+            sample['raw_mmwave_data'] = deepcopy(sample['mmwave_data'])
+
+        if self.transform:
+            sample = self.transform(sample)
 
         return sample
     
     @staticmethod
     def collate_fn(batch):
         batch_data = {}
+        # Define keys to be collated
         keys = ['point_clouds', 'keypoints', 'centroid', 'radius', 'sequence_index', 'index', 'global_index']
         if 'mmwave_data' in batch[0]:
             keys.append('mmwave_data')
+        if 'raw_point_clouds' in batch[0]:
+            keys.append('raw_point_clouds')
+        if 'raw_mmwave_data' in batch[0]:
+            keys.append('raw_mmwave_data')
+
         for key in keys:
-            batch_data[key] = torch.stack([sample[key] for sample in batch], dim=0)
+            if 'raw' in key:
+                # For raw data (list of np.ndarrays), create a list of lists of tensors.
+                # This handles variable numbers of points per frame.
+                batch_data[key] = [[torch.from_numpy(frame).float() for frame in sample[key]] for sample in batch]
+            else:
+                # For padded data, stack into a single tensor.
+                batch_data[key] = torch.from_numpy(np.stack([sample[key] for sample in batch], axis=0))
 
         return batch_data
