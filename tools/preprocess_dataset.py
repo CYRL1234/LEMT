@@ -352,7 +352,7 @@ class MiliPointPreprocessor(Preprocessor):
 #             })
 class MMFiPreprocessor(Preprocessor):
     def __init__(self, root_dir, out_dir, modality='mmwave', localization_checkpoint=None,
-                 localization_model_name=None, localization_model_params=None, device=None):
+                 localization_model_name=None, localization_model_params=None, device=None, split_mode='random', seed = 0):
         super().__init__(root_dir, out_dir)
         self.action_p1 = ['2', '3', '4', '5', '13', '14', '17', '18', '19', '20', '21', '22', '23', '27']
         assert modality in ['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual']
@@ -362,6 +362,9 @@ class MMFiPreprocessor(Preprocessor):
         self.localization_model_params = localization_model_params
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.localization_model = None
+        self.split_mode = split_mode
+        self._fixed_rng = np.random.RandomState(seed) # For fixed separation splitting, 42 is arbitrary seed which will produce same splits every time
+        self.seed = seed
 
     def _load_localization_model(self):
         if self.localization_model is not None:
@@ -397,7 +400,10 @@ class MMFiPreprocessor(Preprocessor):
         dirs = sorted(glob(os.path.join(self.root_dir, 'E*/S*/A*')))
 
         seq_idxs = np.arange(len(dirs))
-        np.random.shuffle(seq_idxs)
+        if self.split_mode == 'fixed_seperation':
+            self._fixed_rng.shuffle(seq_idxs)
+        else:
+            np.random.shuffle(seq_idxs)
         num_train = int(len(seq_idxs) * 0.8)
         num_val = int(len(seq_idxs) * 0.1)
         self.results['splits']['train_rdn_p3'] = sorted(seq_idxs[:num_train])
@@ -1070,19 +1076,22 @@ if __name__ == '__main__':
     parser.add_argument('--localization_checkpoint', type=str, default=None, help='Path to trained localization checkpoint')
     parser.add_argument('--localization_model_name', type=str, default=None, help='Override localization model name')
     parser.add_argument('--localization_model_params', type=str, default=None, help='JSON string for localization model params')
+    parser.add_argument('--split_mode', type=str, default='random', choices=['random', 'fixed_seperation'], help='MMFi split mode')
     args = parser.parse_args()
 
-    if args.cfg:
+    if args.modality == 'roi_bg_dual':
+        if not args.cfg:
+            raise ValueError("roi_bg_dual requires --cfg with localization settings")
         cfg = load_cfg(args.cfg)
         args = merge_args_cfg(args, cfg)
 
     localization_model_params = None
-    if args.localization_model_params:
+    if args.modality == 'roi_bg_dual' and args.localization_model_params:
         if isinstance(args.localization_model_params, str):
             localization_model_params = json.loads(args.localization_model_params)
         else:
             localization_model_params = args.localization_model_params
-
+    args.seed = 0 #0 for MMFi
     if args.dataset == 'mmfi':
         preprocessor = MMFiPreprocessor(
             args.root_dir,
@@ -1090,7 +1099,9 @@ if __name__ == '__main__':
             args.modality,
             localization_checkpoint=args.localization_checkpoint,
             localization_model_name=args.localization_model_name,
-            localization_model_params=localization_model_params
+            localization_model_params=localization_model_params,
+            split_mode=args.split_mode,
+            seed = args.seed
         )
     elif args.dataset == 'mili':
         preprocessor = MiliPointPreprocessor(args.root_dir, args.out_dir)

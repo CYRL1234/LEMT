@@ -12,8 +12,8 @@ epochs: &epochs 30
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_roi_bg/mmfi_roi_bg_dual.pkl
-    split: [train_rdn_p3, val_rdn_p3]
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_roi_bg/mmfi_roi_bg_dual_default.pkl
+    split: [train_rdn_p3, val_rdn_p3] #rdn, xsub, xenv
 val_dataset:
   name: BaseDataset
   params:

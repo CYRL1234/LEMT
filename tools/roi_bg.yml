@@ -9,7 +9,7 @@ modality: roi_bg_dual
 # --------------------------------------
 # Localization model parameters
 # --------------------------------------
-localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_new/HumanLocalizeP4Transformer-epoch=16-val_loss=0.0065.ckpt
+localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default/HumanLocalizeP4Transformer-epoch=23-val_loss=0.0109.ckpt
 localization_model_name: HumanLocalizeP4Transformer
 localization_model_params:
   radius: 0.7

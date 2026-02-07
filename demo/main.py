@@ -57,6 +57,16 @@ def _rerun_offset_x(points, offset):
     shifted[:, 0] += offset
     return shifted
 
+def _ensure_2d(pc, cols=3):
+    if pc is None:
+        return np.zeros((0, cols))
+    arr = np.asarray(pc)
+    if arr.ndim == 1:
+        if arr.size == 0:
+            return np.zeros((0, cols))
+        return arr.reshape(-1, cols)
+    return arr
+
 def _rerun_offset_z(points, offset):
     if points is None or points.shape[0] == 0:
         return points
@@ -226,7 +236,9 @@ def extract_roi(point_cloud, predicted_location, edge_length):
                     The original point features are preserved.
     """
     if point_cloud is None or point_cloud.shape[0] == 0:
-        return np.array([])
+        if point_cloud is None:
+            return np.zeros((0, 3))
+        return np.zeros((0, point_cloud.shape[1]))
 
     # Ensure predicted_location is a numpy array for calculations
     center = np.array(predicted_location)
@@ -722,6 +734,7 @@ def main(args):
     previous_extracted_mmwave_frames = []
     all_predictions = []
     all_ground_truths = []
+    last_pred_kp7_abs = None
 
     clip_len = 5
     max_points = 128
@@ -834,14 +847,19 @@ def main(args):
             mm_norm = pad_point_cloud(mm_norm, 128)
             normalized_mmwave_frames.append(mm_norm)
         
-        # Prepare the batch from numpy arrays and then convert to a tensor
-        mmwave_input_numpy = prepare_hpe_input(normalized_mmwave_frames)
-        mmwave_input_tensor = torch.from_numpy(mmwave_input_numpy).float().to(device)
+        mmwave_count = mmwave_data[frame_idx].shape[0] if mmwave_data[frame_idx] is not None else 0
+        if mmwave_count < 3 and last_pred_kp7_abs is not None:
+            predicted_location_abs = last_pred_kp7_abs.copy()
+            predicted_location = predicted_location_abs - keypoint
+        else:
+            # Prepare the batch from numpy arrays and then convert to a tensor
+            mmwave_input_numpy = prepare_hpe_input(normalized_mmwave_frames)
+            mmwave_input_tensor = torch.from_numpy(mmwave_input_numpy).float().to(device)
 
-        # print(f"Localization model input shape: {mmwave_input_tensor.shape}")
-        predicted_location_tensor = localization_model(mmwave_input_tensor)
-        predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
-        predicted_location_abs = predicted_location + keypoint
+            # print(f"Localization model input shape: {mmwave_input_tensor.shape}")
+            predicted_location_tensor = localization_model(mmwave_input_tensor)
+            predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
+            predicted_location_abs = predicted_location + keypoint
 
         if enable_rerun:
             x_raw = 0.0
@@ -951,7 +969,11 @@ def main(args):
             current_filtered_lidar_frames = previous_filtered_lidar_frames
         
         # Obtain hpe_centroid using lidar_human over the clip
-        lidar_cat = np.concatenate(current_filtered_lidar_frames, axis=0) if len(current_filtered_lidar_frames) > 0 else np.zeros((0, 3))
+        if len(current_filtered_lidar_frames) > 0:
+            current_filtered_lidar_frames = [_ensure_2d(pc, cols=3) for pc in current_filtered_lidar_frames]
+            lidar_cat = np.concatenate(current_filtered_lidar_frames, axis=0)
+        else:
+            lidar_cat = np.zeros((0, 3))
         if lidar_cat.shape[0] > 0:
             hpe_centroid = np.array([
                 np.median(lidar_cat[:, 0]),
@@ -999,6 +1021,8 @@ def main(args):
             mm_filt = filter_pcl(last_kp, last_mm, bound=0.2)
             pc_norm = normalize(pc_filt, hpe_centroid)
             mm_norm = normalize(mm_filt, hpe_centroid)
+            pc_norm = _ensure_2d(pc_norm, cols=3)
+            mm_norm = _ensure_2d(mm_norm, cols=3)
             pc_norm = remove_outliers_box(pc_norm, radius=1.5)
             pc_norm = remove_outliers_radius(pc_norm, radius=0.15, min_neighbors=3)
             pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
@@ -1012,6 +1036,8 @@ def main(args):
         for idx, (pc_frame, mm_frame) in enumerate(zip(current_filtered_lidar_frames, current_extracted_mmwave_frames)):
             pc_norm = normalize(pc_frame, hpe_centroid)
             mm_norm = normalize(mm_frame, hpe_centroid)
+            pc_norm = _ensure_2d(pc_norm, cols=3)
+            mm_norm = _ensure_2d(mm_norm, cols=3)
             pc_norm = remove_outliers_box(pc_norm, radius=1.5)
             mm_norm = remove_outliers_box(mm_norm, radius=1.5)
             pc_norm = remove_outliers_radius(pc_norm, radius=0.15, min_neighbors=3)
@@ -1044,6 +1070,8 @@ def main(args):
             all_ground_truths.append(normalized_gt_hpe)
 
             hpe_output_vis = hpe_output + hpe_centroid
+            if hpe_output_vis.shape[0] > 7:
+                last_pred_kp7_abs = hpe_output_vis[7].copy()
             
             # 5. Visualize predicted keypoints + original lidar data
             # visualize_and_save(frame_idx, "5_predicted_keypoints",
@@ -1101,19 +1129,19 @@ def main(args):
             print("Not enough frames to run HPE model yet.")
         
         print("--------------------------------------------------")
-        time.sleep(0.1) # Sleep for 0.1s in each iteration
+        time.sleep(0) # Sleep for 0.1s in each iteration
         # === After the loop finishes, calculate and print the errors ===
         if all_predictions:
             calculate_and_print_errors(all_predictions, all_ground_truths)
         else:
             print("No frames were processed to calculate error.")
 
-    if enable_rerun:
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nShutting down visualization server.")
+    # if enable_rerun:
+    #     try:
+    #         while True:
+    #             time.sleep(1)
+    #     except KeyboardInterrupt:
+    #         print("\nShutting down visualization server.")
 
 if __name__ == '__main__':
     parser = ArgumentParser()
