@@ -386,11 +386,23 @@ class HumanLocalizeP4Transformer(nn.Module):
     def forward(self, input, mmwave_input=None):
         device = input.get_device()
         
-        if input.shape[-1] != 5:
-            raise RuntimeError(f"HumanLocalizeP4Transformer expects 5-channel input (x,y,z,doppler,intensity), got {input.shape[-1]}")
-        if self.features != 3:
-            raise RuntimeError(f"HumanLocalizeP4Transformer expects features=3 for [z,doppler,intensity], got {self.features}")
-        input_feat = input[:, :, :, -self.features:]
+        if input.shape[-1] == 5:
+            if self.features != 3:
+                raise RuntimeError(
+                    f"HumanLocalizeP4Transformer expects features=3 for 5-channel input, got {self.features}"
+                )
+            input_feat = input[:, :, :, -self.features:]
+        elif input.shape[-1] == 3:
+            if self.features != 3:
+                raise RuntimeError(
+                    f"HumanLocalizeP4Transformer expects features=3 for 3-channel input, got {self.features}"
+                )
+            input_feat = input
+        else:
+            raise RuntimeError(
+                "HumanLocalizeP4Transformer expects 3-channel (lidar) or 5-channel (mmwave) input, "
+                f"got {input.shape[-1]}"
+            )
             
         xyzs, features = self.tube_embedding(input[:,:,:,:3], input_feat.clone().permute(0,1,3,2))                                             # [B, L, n, 3], [B, L, C, n]
 

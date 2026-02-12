@@ -73,15 +73,15 @@ def remove_background(lidar_point_cloud, background_points, buffer):
     return lidar_point_cloud[foreground_mask]
 
 
-def feature_transfer(lidar_points, mmwave_points, mode='mmwave', knn_k=3):
-    if lidar_points is None or lidar_points.shape[0] == 0:
-        num_features = (mmwave_points.shape[1] - 3) if mode == 'mmwave' and mmwave_points is not None else 0
-        return np.empty((0, 3 + num_features))
-
+def feature_transfer(lidar_points, mmwave_points, mode='mmwave', knn_k=3, bbox_min=None, bbox_max=None):
     if mode == 'empty':
         num_features = 2
         empty_features = np.zeros((lidar_points.shape[0], num_features))
         return np.concatenate([lidar_points, empty_features], axis=1)
+
+    if lidar_points is None or lidar_points.shape[0] == 0:
+        num_features = (mmwave_points.shape[1] - 3) if mode == 'mmwave' and mmwave_points is not None else 0
+        return np.empty((0, 3 + num_features))
 
     if mmwave_points is None or mmwave_points.shape[0] == 0:
         return feature_transfer(lidar_points, None, mode='empty')
@@ -90,8 +90,12 @@ def feature_transfer(lidar_points, mmwave_points, mode='mmwave', knn_k=3):
     mmwave_xyz = mmwave_points[:, :3]
     mmwave_feat = mmwave_points[:, 3:]
 
-    all_xyz = np.concatenate([lidar_xyz, mmwave_xyz], axis=0)
-    min_xyz, max_xyz = np.min(all_xyz, axis=0), np.max(all_xyz, axis=0)
+    if bbox_min is not None and bbox_max is not None:
+        min_xyz = np.array(bbox_min)
+        max_xyz = np.array(bbox_max)
+    else:
+        all_xyz = np.concatenate([lidar_xyz, mmwave_xyz], axis=0)
+        min_xyz, max_xyz = np.min(all_xyz, axis=0), np.max(all_xyz, axis=0)
     expand_ratio = 0.1
     min_xyz -= (max_xyz - min_xyz) * expand_ratio
     max_xyz += (max_xyz - min_xyz) * expand_ratio
@@ -232,18 +236,21 @@ def load_models(cfg, device):
     return loc_model, hpe_model
 
 
-def evaluate_sequence(seq, loc_model, hpe_model, device):
+def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmwave', hpe_input_modality='dual', hpe_fusion_mode='none'):
+    if hpe_fusion_mode == 'dual':
+        assert hpe_input_modality == 'dual', "fusion_mode 'dual' requires hpe_input_modality 'dual'"
     background_points = None
     previous_mmwave_frames = []
     previous_kps_frames = []
     previous_filtered_lidar_frames = []
     previous_extracted_mmwave_frames = []
+    previous_lidar_frames = []
     last_pred_kp7_abs = None
 
     clip_len = 5
     max_points = 128
     num_background_points = 2048
-    num_new_background_points = 1024
+    num_new_background_points = 256 # Reduced from 1024 to 256 for less biased updates
 
     lidar_data = seq['point_clouds']
     mmwave_data = seq.get('mmwave_data')
@@ -263,6 +270,17 @@ def evaluate_sequence(seq, loc_model, hpe_model, device):
 
     for frame_idx in range(len(lidar_data)):
         per_frame_mm_counts.append(int(mmwave_data[frame_idx].shape[0]))
+
+        previous_lidar_frames.append(lidar_data[frame_idx])
+        if len(previous_lidar_frames) > clip_len:
+            previous_lidar_frames.pop(0)
+
+        if len(previous_lidar_frames) < clip_len:
+            fill_lidar_frames = [previous_lidar_frames[0]] * (clip_len - len(previous_lidar_frames))
+            current_lidar_frames = fill_lidar_frames + previous_lidar_frames
+        else:
+            current_lidar_frames = previous_lidar_frames
+
         previous_mmwave_frames.append(mmwave_data[frame_idx])
         if len(previous_mmwave_frames) > clip_len:
             previous_mmwave_frames.pop(0)
@@ -283,25 +301,52 @@ def evaluate_sequence(seq, loc_model, hpe_model, device):
         else:
             current_kps_frames = previous_kps_frames
 
-        keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
-
-        normalized_mmwave_frames = []
-        for mm_frame in current_mmwave_frames:
-            mm_norm = normalize(mm_frame, keypoint)
-            mm_norm = remove_outliers_box(mm_norm, radius=3.0)
-            mm_norm = pad_point_cloud(mm_norm, 128)
-            normalized_mmwave_frames.append(mm_norm)
+        if localization_input in ('lidar', 'feature_transferred_lidar'):
+            keypoint = get_centroid(np.concatenate(current_lidar_frames, axis=0), centroid_type='median')
+        else:
+            keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
 
         mmwave_count = int(mmwave_data[frame_idx].shape[0]) if mmwave_data[frame_idx] is not None else 0
-        if mmwave_count < 3 and last_pred_kp7_abs is not None:
+        if localization_input == 'mmwave' and mmwave_count < 3 and last_pred_kp7_abs is not None:
             predicted_location_abs = last_pred_kp7_abs.copy()
             predicted_location = predicted_location_abs - keypoint
         else:
-            mmwave_input_numpy = prepare_hpe_input(normalized_mmwave_frames)
-            mmwave_input_tensor = torch.from_numpy(mmwave_input_numpy).float().to(device)
+            if localization_input == 'lidar':
+                normalized_loc_frames = []
+                for pc_frame in current_lidar_frames:
+                    pc_norm = normalize(pc_frame, keypoint)
+                    pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                    pc_feat = feature_transfer(pc_norm, None, mode='empty', knn_k=3)
+                    pc_feat = pad_point_cloud(pc_feat, 256)
+                    normalized_loc_frames.append(pc_feat)
+            elif localization_input == 'feature_transferred_lidar':
+                normalized_loc_frames = []
+                for pc_frame, mm_frame in zip(current_lidar_frames, current_mmwave_frames):
+                    pc_norm = normalize(pc_frame, keypoint)
+                    mm_norm = normalize(mm_frame, keypoint)
+                    pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                    # combined_points = np.concatenate([pc_norm[:, :3], mm_norm[:, :3]], axis=0)
+
+                    # bbox_min = np.min(combined_points, axis=0) if combined_points is not None else None
+                    # bbox_max = np.max(combined_points, axis=0) if combined_points is not None else None
+                    # pc_feat = pad_point_cloud(pc_norm, 256)
+                    # pc_feat = feature_transfer(pc_feat, mm_norm, mode='mmwave', knn_k=3, bbox_min=bbox_min, bbox_max=bbox_max)
+                    pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
+                    pc_feat = pad_point_cloud(pc_feat, 256)
+                    normalized_loc_frames.append(pc_feat)
+            else:
+                normalized_loc_frames = []
+                for mm_frame in current_mmwave_frames:
+                    mm_norm = normalize(mm_frame, keypoint)
+                    mm_norm = remove_outliers_box(mm_norm, radius=3.0)
+                    mm_norm = pad_point_cloud(mm_norm, 128)
+                    normalized_loc_frames.append(mm_norm)
+
+            loc_input_numpy = prepare_hpe_input(normalized_loc_frames)
+            loc_input_tensor = torch.from_numpy(loc_input_numpy).float().to(device)
 
             with torch.no_grad():
-                predicted_location_tensor = loc_model(mmwave_input_tensor)
+                predicted_location_tensor = loc_model(loc_input_tensor)
             predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
             predicted_location_abs = predicted_location + keypoint
         gt_loc = keypoints_data[frame_idx][7]
@@ -333,39 +378,100 @@ def evaluate_sequence(seq, loc_model, hpe_model, device):
         else:
             current_filtered_lidar_frames = previous_filtered_lidar_frames
 
-        lidar_cat = np.concatenate(current_filtered_lidar_frames, axis=0) if len(current_filtered_lidar_frames) > 0 else np.zeros((0, 3))
-        if lidar_cat.shape[0] > 0:
-            hpe_centroid = np.array([
-                np.median(lidar_cat[:, 0]),
-                np.min(lidar_cat[:, 1]),
-                np.median(lidar_cat[:, 2])
-            ])
+        if hpe_input_modality == 'mmwave':
+            mm_cat = np.concatenate(current_extracted_mmwave_frames, axis=0) if len(current_extracted_mmwave_frames) > 0 else np.zeros((0, 3))
+            hpe_centroid = get_centroid(mm_cat, centroid_type='median') if mm_cat.shape[0] > 0 else predicted_location_abs.copy()
         else:
-            hpe_centroid = predicted_location_abs.copy()
+            lidar_cat = np.concatenate(current_filtered_lidar_frames, axis=0) if len(current_filtered_lidar_frames) > 0 else np.zeros((0, 3))
+            if lidar_cat.shape[0] > 0:
+                hpe_centroid = np.array([
+                    np.median(lidar_cat[:, 0]),
+                    np.min(lidar_cat[:, 1]),
+                    np.median(lidar_cat[:, 2])
+                ])
+            else:
+                hpe_centroid = predicted_location_abs.copy()
         per_frame_centroid_err.append(_point_dist(hpe_centroid, gt_loc))
 
         normalized_gt_hpe = normalize(keypoints_data[frame_idx], hpe_centroid)
 
         hpe_frames = []
-        for pc_frame, mm_frame in zip(current_filtered_lidar_frames, current_extracted_mmwave_frames):
-            pc_norm = normalize(pc_frame, hpe_centroid)
-            mm_norm = normalize(mm_frame, hpe_centroid)
-            pc_norm = remove_outliers_box(pc_norm, radius=1.5)
-            mm_norm = remove_outliers_box(mm_norm, radius=1.5)
-            pc_norm = remove_outliers_radius(pc_norm, radius=0.15, min_neighbors=3)
-            pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
-            pc_padded = pad_point_cloud(pc_feat, max_points)
-            hpe_frames.append(pc_padded)
+        mmwave_frames = []
+        if hpe_input_modality == 'mmwave':
+            for mm_frame in current_extracted_mmwave_frames:
+                mm_norm = normalize(mm_frame, hpe_centroid)
+                mm_norm = remove_outliers_box(mm_norm, radius=3.0)
+                mm_padded = pad_point_cloud(mm_norm, max_points)
+                hpe_frames.append(mm_padded)
+        elif hpe_input_modality == 'lidar':
+            for pc_frame in current_filtered_lidar_frames:
+                pc_norm = normalize(pc_frame, hpe_centroid)
+                pc_norm = remove_outliers_box(pc_norm, radius=1.5)
+                pc_norm = remove_outliers_radius(pc_norm, radius=0.15, min_neighbors=3)
+                #print frame index if the pc_norm is empty
+                if pc_norm.shape[0] == 0:
+                    print(f"Warning: Empty LiDAR frame at index {frame_idx}")
+                pc_feat = feature_transfer(pc_norm, None, mode='empty', knn_k=3)
+                pc_padded = pad_point_cloud(pc_feat, max_points)
+                hpe_frames.append(pc_padded)
+        else:
+            for pc_frame, mm_frame in zip(current_filtered_lidar_frames, current_extracted_mmwave_frames):
+                pc_norm = normalize(pc_frame, hpe_centroid)
+                mm_norm = normalize(mm_frame, hpe_centroid)
+                pc_norm = remove_outliers_box(pc_norm, radius=1.5)
+                mm_norm = remove_outliers_box(mm_norm, radius=1.5)
+                pc_norm = remove_outliers_radius(pc_norm, radius=0.15, min_neighbors=3)
+                pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
+                pc_padded = pad_point_cloud(pc_feat, max_points)
+                hpe_frames.append(pc_padded)
+
+                if hpe_fusion_mode == 'dual':
+                    mm_padded = pad_point_cloud(mm_norm, max_points)
+                    mmwave_frames.append(mm_padded)
 
         if len(hpe_frames) < clip_len:
             while len(hpe_frames) < clip_len:
                 hpe_frames.insert(0, hpe_frames[0])
 
+        if len(hpe_frames) > clip_len:
+            hpe_frames = hpe_frames[-clip_len:]
+
+        if hpe_fusion_mode == 'dual' and len(mmwave_frames) < clip_len:
+            while len(mmwave_frames) < clip_len:
+                mmwave_frames.insert(0, mmwave_frames[0])
+
+        if hpe_fusion_mode == 'dual' and len(mmwave_frames) > clip_len:
+            mmwave_frames = mmwave_frames[-clip_len:]
+
+        if hpe_frames:
+            if hpe_input_modality == 'mmwave':
+                target_feat = 5
+            else:
+                target_feat = hpe_frames[0].shape[1]
+            fixed_frames = []
+            for frame in hpe_frames:
+                if frame.shape[1] == target_feat:
+                    fixed_frames.append(frame)
+                    continue
+                if frame.shape[1] > target_feat:
+                    fixed_frames.append(frame[:, :target_feat])
+                else:
+                    pad_cols = target_feat - frame.shape[1]
+                    fixed_frames.append(np.concatenate([frame, np.zeros((frame.shape[0], pad_cols))], axis=1))
+            hpe_frames = fixed_frames
+
         HPE_input_numpy = prepare_hpe_input(hpe_frames)
         HPE_input_tensor = torch.from_numpy(HPE_input_numpy).float().to(device)
 
-        with torch.no_grad():
-            hpe_output_tensor = hpe_model(HPE_input_tensor)
+        if hpe_fusion_mode == 'dual':
+            mmwave_input_numpy = prepare_hpe_input(mmwave_frames)
+            mmwave_input_tensor = torch.from_numpy(mmwave_input_numpy).float().to(device)
+
+            with torch.no_grad():
+                hpe_output_tensor = hpe_model(HPE_input_tensor, mmwave_input_tensor)
+        else:
+            with torch.no_grad():
+                hpe_output_tensor = hpe_model(HPE_input_tensor)
         hpe_output = hpe_output_tensor.detach().cpu().numpy().squeeze()
 
         frame_mpjpe = mpjpe(hpe_output, normalized_gt_hpe) * 1000.0
@@ -464,7 +570,15 @@ def main():
         (mpjpe_sum, pampjpe_sum, count,
          per_frame_mpjpe, per_frame_pampjpe,
          per_frame_mm_counts, per_frame_loc_err,
-         per_frame_centroid_err) = evaluate_sequence(seq, loc_model, hpe_model, device)
+         per_frame_centroid_err) = evaluate_sequence(
+            seq,
+            loc_model,
+            hpe_model,
+            device,
+            localization_input=_cfg_get(cfg, 'localization_input', 'mmwave'),
+            hpe_input_modality=_cfg_get(cfg, 'input_modality', 'dual'),
+            hpe_fusion_mode=_cfg_get(_cfg_get(cfg, 'model_params', {}), 'fusion_mode', 'none')
+        )
         total_mpjpe += mpjpe_sum
         total_pampjpe += pampjpe_sum
         total_count += count

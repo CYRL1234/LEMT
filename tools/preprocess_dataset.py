@@ -352,7 +352,8 @@ class MiliPointPreprocessor(Preprocessor):
 #             })
 class MMFiPreprocessor(Preprocessor):
     def __init__(self, root_dir, out_dir, modality='mmwave', localization_checkpoint=None,
-                 localization_model_name=None, localization_model_params=None, device=None, split_mode='random', seed = 0):
+                 localization_model_name=None, localization_model_params=None, device=None, split_mode='random', seed = 0,
+                 localization_input='mmwave'):
         super().__init__(root_dir, out_dir)
         self.action_p1 = ['2', '3', '4', '5', '13', '14', '17', '18', '19', '20', '21', '22', '23', '27']
         assert modality in ['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual']
@@ -362,6 +363,7 @@ class MMFiPreprocessor(Preprocessor):
         self.localization_model_params = localization_model_params
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.localization_model = None
+        self.localization_input = localization_input
         self.split_mode = split_mode
         self._fixed_rng = np.random.RandomState(seed) # For fixed separation splitting, 42 is arbitrary seed which will produce same splits every time
         self.seed = seed
@@ -459,11 +461,22 @@ class MMFiPreprocessor(Preprocessor):
 
                 background_points = None
                 previous_mmwave_frames = []
+                previous_lidar_frames = []
 
                 new_pcs = []
                 new_kps = []
                 new_mms = []
                 for frame_idx, (lidar_frame, mm_frame, kp_frame) in enumerate(zip(pcs, pcs_mmwave, kps)):
+                    previous_lidar_frames.append(lidar_frame)
+                    if len(previous_lidar_frames) > clip_len:
+                        previous_lidar_frames.pop(0)
+
+                    if len(previous_lidar_frames) < clip_len:
+                        fill_lidar_frames = [previous_lidar_frames[0]] * (clip_len - len(previous_lidar_frames))
+                        current_lidar_frames = fill_lidar_frames + previous_lidar_frames
+                    else:
+                        current_lidar_frames = previous_lidar_frames
+
                     previous_mmwave_frames.append(mm_frame)
                     if len(previous_mmwave_frames) > clip_len:
                         previous_mmwave_frames.pop(0)
@@ -474,20 +487,40 @@ class MMFiPreprocessor(Preprocessor):
                     else:
                         current_mmwave_frames = previous_mmwave_frames
 
-                    keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
+                    if self.localization_input in ('lidar', 'feature_transferred_lidar'):
+                        keypoint = get_centroid(np.concatenate(current_lidar_frames, axis=0), centroid_type='median')
+                    else:
+                        keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
 
-                    normalized_mmwave_frames = []
-                    for mm_prev in current_mmwave_frames:
-                        mm_norm = normalize(mm_prev, keypoint)
-                        mm_norm = remove_outliers_box(mm_norm, radius=3.0)
-                        mm_norm = pad_point_cloud(mm_norm, 128)
-                        normalized_mmwave_frames.append(mm_norm)
+                    if self.localization_input == 'lidar':
+                        normalized_loc_frames = []
+                        for pc_prev in current_lidar_frames:
+                            pc_norm = normalize(pc_prev, keypoint)
+                            pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                            pc_norm = pad_point_cloud(pc_norm, 256)
+                            normalized_loc_frames.append(pc_norm)
+                    elif self.localization_input == 'feature_transferred_lidar':
+                        normalized_loc_frames = []
+                        for pc_prev, mm_prev in zip(current_lidar_frames, current_mmwave_frames):
+                            pc_norm = normalize(pc_prev, keypoint)
+                            mm_norm = normalize(mm_prev, keypoint)
+                            pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                            pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
+                            pc_feat = pad_point_cloud(pc_feat, 256)
+                            normalized_loc_frames.append(pc_feat)
+                    else:
+                        normalized_loc_frames = []
+                        for mm_prev in current_mmwave_frames:
+                            mm_norm = normalize(mm_prev, keypoint)
+                            mm_norm = remove_outliers_box(mm_norm, radius=3.0)
+                            mm_norm = pad_point_cloud(mm_norm, 128)
+                            normalized_loc_frames.append(mm_norm)
 
-                    mmwave_input_numpy = prepare_hpe_input(normalized_mmwave_frames)
-                    mmwave_input_tensor = torch.from_numpy(mmwave_input_numpy).float().to(self.device)
+                    loc_input_numpy = prepare_hpe_input(normalized_loc_frames)
+                    loc_input_tensor = torch.from_numpy(loc_input_numpy).float().to(self.device)
 
                     with torch.no_grad():
-                        predicted_location_tensor = self.localization_model(mmwave_input_tensor)
+                        predicted_location_tensor = self.localization_model(loc_input_tensor)
 
                     predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
                     predicted_location_abs = predicted_location + keypoint
@@ -1100,6 +1133,7 @@ if __name__ == '__main__':
             localization_checkpoint=args.localization_checkpoint,
             localization_model_name=args.localization_model_name,
             localization_model_params=localization_model_params,
+            localization_input=getattr(args, 'localization_input', 'mmwave'),
             split_mode=args.split_mode,
             seed = args.seed
         )

@@ -5,11 +5,11 @@ dataset: mmfi
 root_dir: /home/ryan/MM-Fi/MMFi_Dataset
 out_dir: /home/ryan/MM-Fi/LEMT/data_roi_bg
 modality: roi_bg_dual
-
+localization_input: feature_transferred_lidar
 # --------------------------------------
 # Localization model parameters
 # --------------------------------------
-localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default/HumanLocalizeP4Transformer-epoch=23-val_loss=0.0109.ckpt
+localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default_feature_transferred_lidar/HumanLocalizeP4Transformer-epoch=11-val_loss=0.0011.ckpt
 localization_model_name: HumanLocalizeP4Transformer
 localization_model_params:
   radius: 0.7

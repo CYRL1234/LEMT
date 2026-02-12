@@ -4,17 +4,16 @@ pretrained: False
 sync_batchnorm: False
 clip_grad: null
 precision: 16
-train_module: Human Localization Module
-localization_input: mmwave
 #original 100
 epochs: &epochs 30
+input_modality: mmwave
 # --------------------------------------
 # Dataset parameters
 # --------------------------------------
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_raw_dual/mmfi_raw_dual_default.pkl
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_roi_bg/mmfi_roi_bg_dual_default.pkl
     split: [train_rdn_p3, val_rdn_p3] #rdn, xsub, xenv
 val_dataset:
   name: BaseDataset
@@ -44,8 +43,12 @@ sched_params:
 # Model parameters
 # --------------------------------------
 mode: train
-model_name: HumanLocalizeP4Transformer
+model_name: P4Transformer
 model_params:
+  fusion_mode: 'none'     # Options: 'none', 'dual'
+  fusion_type: 'late'    # Options: 'early', 'late'
+  lidar_features: 3       # (),() for LiDAR
+  mmwave_features: 2      # doppler + intensity for mmWave
   radius: 0.7
   nsamples: 32
   spatial_stride: 8
@@ -57,8 +60,10 @@ model_params:
   heads: 8
   dim_head: 128
   mlp_dim: 2048
-  output_dim: 3
+  output_dim: 51
   features: 3
+  lidar_weight: 1.0
+  mmwave_weight: 0.5
 # --------------------------------------
 # Loss parameters
 # --------------------------------------
@@ -72,10 +77,13 @@ train_pipeline:
     params: 
       pad_type: 'start'
       clip_len: 5
+  # - name: RemoveFloor
+  #   params:
+  #     buffer: 0.1
   - name: GetCentroid
     params: 
       centroid_type: 'median'
-      # data_type: 'mmwave'
+      data_type: 'mmwave'
   - name: Normalize
     params:
       feat_scale: null
@@ -87,8 +95,14 @@ train_pipeline:
   - name: RemoveOutliers
     params: 
       outlier_type: 'box'
-      radius: 3 # original 1.5
-      # data_type: 'mmwave'
+      radius: 3
+      data_type: 'mmwave'
+  # - name: RemoveOutliers
+  #   params: 
+  #     outlier_type: 'radius'
+  #     radius: 0.15 # original 1.5
+  #     min_neighbors: 3
+  #     data_type: 'mmwave'
   # - name: AddNoisyPoints
   #   params:
   #     add_std: 0.2
@@ -114,14 +128,14 @@ train_pipeline:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
-  - name: FeatureTransfer
-    params:
-      feature_idx: [3,4]
-      knn_k: 3
-      transfer_type: 'empty' #'mmwave', 'empty'
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty' #'mmwave', 'empty'
   - name: Pad
     params:
-      max_len: 256
+      max_len: 128
       mm_len: 128
   # - name: FeatureTransfer
   #   params:
@@ -139,10 +153,13 @@ val_pipeline: &val_pipeline
     params:
       pad_type: 'start'
       clip_len: 5
+  # - name: RemoveFloor
+  #   params:
+  #     buffer: 0.1
   - name: GetCentroid
     params: 
       centroid_type: 'median'
-      # data_type: 'mmwave'
+      data_type: 'mmwave'
   # - name: ToITOP
   #   params: null
   # - name: MultiFrameAggregate
@@ -154,21 +171,27 @@ val_pipeline: &val_pipeline
   - name: RemoveOutliers
     params: 
       outlier_type: 'box'
-      radius: 3 # original 1.5
-      # data_type: 'mmwave'
+      radius: 3
+      data_type: 'mmwave'
+  # - name: RemoveOutliers
+  #   params: 
+  #     outlier_type: 'radius'
+  #     radius: 0.15 # original 1.5
+  #     min_neighbors: 3
+  #     data_type: 'mmwave'
   - name: ReduceKeypointLen
     params:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
-  - name: FeatureTransfer
-    params:
-      feature_idx: [3,4]
-      knn_k: 3
-      transfer_type: 'empty'
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
   - name: Pad
     params:
-      max_len: 256
+      max_len: 128
       mm_len: 128
       #lidar -> 512, mmwave -> 128
   # - name: FeatureTransfer
@@ -183,10 +206,13 @@ test_pipeline:
     params:
       pad_type: 'start'
       clip_len: 5
+  # - name: RemoveFloor
+  #   params:
+  #     buffer: 0.1
   - name: GetCentroid
     params: 
       centroid_type: 'median'
-      # data_type: 'mmwave'
+      data_type: 'mmwave'
   # - name: ToITOP
   #   params: null
   # - name: MultiFrameAggregate
@@ -198,21 +224,28 @@ test_pipeline:
   - name: RemoveOutliers
     params: 
       outlier_type: 'box'
-      radius: 3 # original 1.5
-      # data_type: 'mmwave'
+      radius: 3
+      data_type: 'mmwave'
+  #try to remove either if the RemoveOutliers to test
+  # - name: RemoveOutliers
+  #   params: 
+  #     outlier_type: 'radius'
+  #     radius: 0.15 # original 1.5
+  #     min_neighbors: 3
+  #     data_type: 'mmwave'
   - name: ReduceKeypointLen
     params:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
-  - name: FeatureTransfer
-    params:
-      feature_idx: [3,4]
-      knn_k: 3
-      transfer_type: 'empty'
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
   - name: Pad
     params:
-      max_len: 256
+      max_len: 128
       mm_len: 128
   # - name: FeatureTransfer
   #   params:

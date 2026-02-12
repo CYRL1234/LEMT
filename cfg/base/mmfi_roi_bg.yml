@@ -12,7 +12,7 @@ epochs: &epochs 30
 train_dataset:
   name: BaseDataset
   params:
-    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_roi_bg/mmfi_roi_bg_dual_default.pkl
+    data_path: &data_path /home/ryan/MM-Fi/LEMT/data_roi_bg/mmfi_roi_bg_dual_default_feature_transferred_lidar.pkl
     split: [train_rdn_p3, val_rdn_p3] #rdn, xsub, xenv
 val_dataset:
   name: BaseDataset
@@ -44,7 +44,7 @@ sched_params:
 mode: train
 model_name: P4Transformer
 model_params:
-  fusion_mode: 'none'     # Options: 'none', 'dual'
+  fusion_mode: 'dual'     # Options: 'none', 'dual'
   fusion_type: 'late'    # Options: 'early', 'late'
   lidar_features: 3       # (),() for LiDAR
   mmwave_features: 2      # doppler + intensity for mmWave

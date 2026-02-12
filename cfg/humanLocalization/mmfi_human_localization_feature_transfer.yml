@@ -5,7 +5,7 @@ sync_batchnorm: False
 clip_grad: null
 precision: 16
 train_module: Human Localization Module
-localization_input: mmwave
+localization_input: feature_transferred_lidar
 #original 100
 epochs: &epochs 30
 # --------------------------------------
@@ -114,20 +114,20 @@ train_pipeline:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
-  - name: FeatureTransfer
-    params:
-      feature_idx: [3,4]
-      knn_k: 3
-      transfer_type: 'empty' #'mmwave', 'empty'
-  - name: Pad
-    params:
-      max_len: 256
-      mm_len: 128
   # - name: FeatureTransfer
   #   params:
   #     feature_idx: [3,4]
   #     knn_k: 3
-  #     transfer_type: 'mmwave'
+  #     transfer_type: 'empty' #'mmwave', 'empty'
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
+  - name: Pad
+    params:
+      max_len: 256
+      mm_len: 128
   # - name: RandomJitter
   #   params:
   #     jitter_std: 0.05
@@ -161,21 +161,21 @@ val_pipeline: &val_pipeline
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
+  # - name: FeatureTransfer
+  #   params:
+  #     feature_idx: [3,4]
+  #     knn_k: 3
+  #     transfer_type: 'empty'
   - name: FeatureTransfer
     params:
       feature_idx: [3,4]
       knn_k: 3
-      transfer_type: 'empty'
+      transfer_type: 'mmwave'
   - name: Pad
     params:
       max_len: 256
       mm_len: 128
       #lidar -> 512, mmwave -> 128
-  # - name: FeatureTransfer
-  #   params:
-  #     feature_idx: [3,4]
-  #     knn_k: 3
-  #     transfer_type: 'mmwave'
   - name: ToTensor
     params: null
 test_pipeline:
@@ -205,19 +205,19 @@ test_pipeline:
       only_one: true
       keep_type: 'end'
       frame_to_reduce: 0
-  - name: FeatureTransfer
-    params:
-      feature_idx: [3,4]
-      knn_k: 3
-      transfer_type: 'empty'
-  - name: Pad
-    params:
-      max_len: 256
-      mm_len: 128
   # - name: FeatureTransfer
   #   params:
   #     feature_idx: [3,4]
   #     knn_k: 3
-  #     transfer_type: 'mmwave'
+  #     transfer_type: 'empty'
+  - name: FeatureTransfer
+    params:
+      feature_idx: [3,4]
+      knn_k: 3
+      transfer_type: 'mmwave'
+  - name: Pad
+    params:
+      max_len: 256
+      mm_len: 128
   - name: ToTensor
     params: null

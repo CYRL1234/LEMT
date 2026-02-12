@@ -455,10 +455,14 @@ class LitModel(L.LightningModule):
             y_hat = y_hat_sup
 
         elif self.hparams.train_module == 'Human Localization Module':
-            mmwave_data = batch['mmwave_data']
+            input_type = getattr(self.hparams, 'localization_input', 'mmwave')
+            if input_type in ('lidar', 'feature_transferred_lidar'):
+                data = batch['point_clouds']
+            else:
+                data = batch['mmwave_data']
             # print(batch['keypoints'].shape)
             y = batch['keypoints'][:, 0, 7, :] #batch['keypoints'] is shape (16,1,17,3)
-            y_hat = self.model(mmwave_data)
+            y_hat = self.model(data)
             loss = self.loss_fn(y_hat, y)
             loss_dict = {'loss': loss.item()}
         else: # Corresponds to 'HPE Module'
@@ -477,7 +481,16 @@ class LitModel(L.LightningModule):
                 y_hat = self.model(x, mm)  # Pass both inputs to model
             else:
             #---
-                y_hat = self.model(x)  # Original single-modality forward
+                input_modality = getattr(self.hparams, 'input_modality', None)
+                if input_modality is None:
+                    input_modality = self.hparams.model_params.get('input_modality', 'lidar')
+
+                if input_modality == 'mmwave':
+                    mm = batch.get('mmwave_data')
+                    assert mm is not None, "feature_transferred_lidar input requires mmwave_data in batch"
+                    y_hat = self.model(mm)  # Pass both inputs
+                else:
+                    y_hat = self.model(x)  # Original single-modality forward
 
             loss = self.loss_fn(y_hat, y)
             loss_dict = {'loss': loss.item()}
