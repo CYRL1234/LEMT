@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 try:
     from LEMT.model.model_api import create_model
@@ -208,6 +209,37 @@ def _point_dist(a, b):
     return float(np.linalg.norm(a - b))
 
 
+def _mean_joint_jerk(curr, prev, prev_prev):
+    if curr is None or prev is None or prev_prev is None:
+        return float('nan')
+    if curr.shape != prev.shape or prev.shape != prev_prev.shape:
+        return float('nan')
+    jerk = curr - 2.0 * prev + prev_prev
+    return float(np.mean(np.linalg.norm(jerk, axis=1)))
+
+
+def _direction_flip_ratio(curr, prev, prev_prev):
+    if curr is None or prev is None or prev_prev is None:
+        return float('nan')
+    if curr.shape != prev.shape or prev.shape != prev_prev.shape:
+        return float('nan')
+    v1 = curr - prev
+    v0 = prev - prev_prev
+    dots = np.sum(v1 * v0, axis=1)
+    return float(np.mean(dots < 0.0))
+
+
+def _mean_joint_to_lidar_dist(joints, lidar_points):
+    if joints is None or lidar_points is None:
+        return float('nan')
+    if joints.shape[0] == 0 or lidar_points.shape[0] == 0:
+        return float('nan')
+    from scipy.spatial import cKDTree
+    tree = cKDTree(lidar_points[:, :3])
+    distances, _ = tree.query(joints, k=1)
+    return float(np.mean(distances))
+
+
 def _cfg_get(cfg, key, default=None):
     if isinstance(cfg, dict):
         return cfg.get(key, default)
@@ -236,7 +268,18 @@ def load_models(cfg, device):
     return loc_model, hpe_model
 
 
-def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmwave', hpe_input_modality='dual', hpe_fusion_mode='none'):
+def evaluate_sequence(
+    seq,
+    loc_model,
+    hpe_model,
+    device,
+    localization_input='mmwave',
+    hpe_input_modality='dual',
+    hpe_fusion_mode='none',
+    pipeline_mode='roi',
+    background_downsample_rate=None,
+    background_update_rate=None
+):
     if hpe_fusion_mode == 'dual':
         assert hpe_input_modality == 'dual', "fusion_mode 'dual' requires hpe_input_modality 'dual'"
     background_points = None
@@ -249,8 +292,9 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
 
     clip_len = 5
     max_points = 128
-    num_background_points = 2048
+    num_background_points = 1024
     num_new_background_points = 256 # Reduced from 1024 to 256 for less biased updates
+    use_dynamic_bg = background_downsample_rate is not None and background_update_rate is not None
 
     lidar_data = seq['point_clouds']
     mmwave_data = seq.get('mmwave_data')
@@ -267,6 +311,25 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
     per_frame_mm_counts = []
     per_frame_loc_err = []
     per_frame_centroid_err = []
+    per_frame_gt_jerk = []
+    per_frame_pred_jerk = []
+    per_frame_gt_flip = []
+    per_frame_pred_flip = []
+    per_frame_gt_lidar_dist = []
+    per_frame_pred_lidar_dist = []
+
+    prev_gt_kps = None
+    prev_prev_gt_kps = None
+    prev_pred_kps = None
+    prev_prev_pred_kps = None
+
+    if pipeline_mode == 'background_only' and len(lidar_data) > 0:
+        background_points = create_background(
+            lidar_data[0],
+            keypoints_data[0],
+            buffer=0.2,
+            num_points=num_background_points
+        )
 
     for frame_idx in range(len(lidar_data)):
         per_frame_mm_counts.append(int(mmwave_data[frame_idx].shape[0]))
@@ -301,59 +364,70 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
         else:
             current_kps_frames = previous_kps_frames
 
-        if localization_input in ('lidar', 'feature_transferred_lidar'):
-            keypoint = get_centroid(np.concatenate(current_lidar_frames, axis=0), centroid_type='median')
-        else:
-            keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
-
-        mmwave_count = int(mmwave_data[frame_idx].shape[0]) if mmwave_data[frame_idx] is not None else 0
-        if localization_input == 'mmwave' and mmwave_count < 3 and last_pred_kp7_abs is not None:
-            predicted_location_abs = last_pred_kp7_abs.copy()
-            predicted_location = predicted_location_abs - keypoint
-        else:
-            if localization_input == 'lidar':
-                normalized_loc_frames = []
-                for pc_frame in current_lidar_frames:
-                    pc_norm = normalize(pc_frame, keypoint)
-                    pc_norm = remove_outliers_box(pc_norm, radius=3.0)
-                    pc_feat = feature_transfer(pc_norm, None, mode='empty', knn_k=3)
-                    pc_feat = pad_point_cloud(pc_feat, 256)
-                    normalized_loc_frames.append(pc_feat)
-            elif localization_input == 'feature_transferred_lidar':
-                normalized_loc_frames = []
-                for pc_frame, mm_frame in zip(current_lidar_frames, current_mmwave_frames):
-                    pc_norm = normalize(pc_frame, keypoint)
-                    mm_norm = normalize(mm_frame, keypoint)
-                    pc_norm = remove_outliers_box(pc_norm, radius=3.0)
-                    # combined_points = np.concatenate([pc_norm[:, :3], mm_norm[:, :3]], axis=0)
-
-                    # bbox_min = np.min(combined_points, axis=0) if combined_points is not None else None
-                    # bbox_max = np.max(combined_points, axis=0) if combined_points is not None else None
-                    # pc_feat = pad_point_cloud(pc_norm, 256)
-                    # pc_feat = feature_transfer(pc_feat, mm_norm, mode='mmwave', knn_k=3, bbox_min=bbox_min, bbox_max=bbox_max)
-                    pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
-                    pc_feat = pad_point_cloud(pc_feat, 256)
-                    normalized_loc_frames.append(pc_feat)
-            else:
-                normalized_loc_frames = []
-                for mm_frame in current_mmwave_frames:
-                    mm_norm = normalize(mm_frame, keypoint)
-                    mm_norm = remove_outliers_box(mm_norm, radius=3.0)
-                    mm_norm = pad_point_cloud(mm_norm, 128)
-                    normalized_loc_frames.append(mm_norm)
-
-            loc_input_numpy = prepare_hpe_input(normalized_loc_frames)
-            loc_input_tensor = torch.from_numpy(loc_input_numpy).float().to(device)
-
-            with torch.no_grad():
-                predicted_location_tensor = loc_model(loc_input_tensor)
-            predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
-            predicted_location_abs = predicted_location + keypoint
         gt_loc = keypoints_data[frame_idx][7]
-        per_frame_loc_err.append(_point_dist(predicted_location_abs, gt_loc))
 
-        extracted_mmwave = extract_roi(mmwave_data[frame_idx], predicted_location_abs, edge_length=2.5)
-        extracted_lidar = extract_roi(lidar_data[frame_idx], predicted_location_abs, edge_length=2.5)
+        if pipeline_mode == 'background_only':
+            predicted_location_abs = None
+            per_frame_loc_err.append(float('nan'))
+            extracted_lidar = lidar_data[frame_idx]
+            extracted_mmwave = mmwave_data[frame_idx]
+            if background_points is not None:
+                filtered_lidar = remove_background(extracted_lidar, background_points, buffer=0.1)
+            else:
+                filtered_lidar = extracted_lidar
+        else:
+            if localization_input in ('lidar', 'feature_transferred_lidar'):
+                keypoint = get_centroid(np.concatenate(current_lidar_frames, axis=0), centroid_type='median')
+            else:
+                keypoint = get_centroid(np.concatenate(current_mmwave_frames, axis=0), centroid_type='median')
+
+            mmwave_count = int(mmwave_data[frame_idx].shape[0]) if mmwave_data[frame_idx] is not None else 0
+            if localization_input == 'mmwave' and mmwave_count < 3 and last_pred_kp7_abs is not None:
+                predicted_location_abs = last_pred_kp7_abs.copy()
+                predicted_location = predicted_location_abs - keypoint
+            else:
+                if localization_input == 'lidar':
+                    normalized_loc_frames = []
+                    for pc_frame in current_lidar_frames:
+                        pc_norm = normalize(pc_frame, keypoint)
+                        pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                        pc_feat = feature_transfer(pc_norm, None, mode='empty', knn_k=3)
+                        pc_feat = pad_point_cloud(pc_feat, 256)
+                        normalized_loc_frames.append(pc_feat)
+                elif localization_input == 'feature_transferred_lidar':
+                    normalized_loc_frames = []
+                    for pc_frame, mm_frame in zip(current_lidar_frames, current_mmwave_frames):
+                        pc_norm = normalize(pc_frame, keypoint)
+                        mm_norm = normalize(mm_frame, keypoint)
+                        pc_norm = remove_outliers_box(pc_norm, radius=3.0)
+                        pc_feat = feature_transfer(pc_norm, mm_norm, mode='mmwave', knn_k=3)
+                        pc_feat = pad_point_cloud(pc_feat, 256)
+                        normalized_loc_frames.append(pc_feat)
+                else:
+                    normalized_loc_frames = []
+                    for mm_frame in current_mmwave_frames:
+                        mm_norm = normalize(mm_frame, keypoint)
+                        mm_norm = remove_outliers_box(mm_norm, radius=3.0)
+                        mm_norm = pad_point_cloud(mm_norm, 128)
+                        normalized_loc_frames.append(mm_norm)
+
+                loc_input_numpy = prepare_hpe_input(normalized_loc_frames)
+                loc_input_tensor = torch.from_numpy(loc_input_numpy).float().to(device)
+
+                with torch.no_grad():
+                    predicted_location_tensor = loc_model(loc_input_tensor)
+                predicted_location = predicted_location_tensor.detach().cpu().numpy().squeeze()
+                predicted_location_abs = predicted_location + keypoint
+
+            per_frame_loc_err.append(_point_dist(predicted_location_abs, gt_loc))
+
+            extracted_mmwave = extract_roi(mmwave_data[frame_idx], predicted_location_abs, edge_length=2.5)
+            extracted_lidar = extract_roi(lidar_data[frame_idx], predicted_location_abs, edge_length=2.5)
+
+            if background_points is not None:
+                filtered_lidar = remove_background(extracted_lidar, background_points, buffer=0.1)
+            else:
+                filtered_lidar = extracted_lidar
 
         previous_extracted_mmwave_frames.append(extracted_mmwave)
         if len(previous_extracted_mmwave_frames) > clip_len:
@@ -363,11 +437,6 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
             current_extracted_mmwave_frames = fill_extracted_mmwave + previous_extracted_mmwave_frames
         else:
             current_extracted_mmwave_frames = previous_extracted_mmwave_frames
-
-        if background_points is not None:
-            filtered_lidar = remove_background(extracted_lidar, background_points, buffer=0.1)
-        else:
-            filtered_lidar = extracted_lidar
 
         previous_filtered_lidar_frames.append(filtered_lidar)
         if len(previous_filtered_lidar_frames) > clip_len:
@@ -380,7 +449,10 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
 
         if hpe_input_modality == 'mmwave':
             mm_cat = np.concatenate(current_extracted_mmwave_frames, axis=0) if len(current_extracted_mmwave_frames) > 0 else np.zeros((0, 3))
-            hpe_centroid = get_centroid(mm_cat, centroid_type='median') if mm_cat.shape[0] > 0 else predicted_location_abs.copy()
+            if mm_cat.shape[0] > 0:
+                hpe_centroid = get_centroid(mm_cat, centroid_type='median')
+            else:
+                hpe_centroid = np.zeros(3)
         else:
             lidar_cat = np.concatenate(current_filtered_lidar_frames, axis=0) if len(current_filtered_lidar_frames) > 0 else np.zeros((0, 3))
             if lidar_cat.shape[0] > 0:
@@ -390,7 +462,7 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
                     np.median(lidar_cat[:, 2])
                 ])
             else:
-                hpe_centroid = predicted_location_abs.copy()
+                hpe_centroid = np.zeros(3)
         per_frame_centroid_err.append(_point_dist(hpe_centroid, gt_loc))
 
         normalized_gt_hpe = normalize(keypoints_data[frame_idx], hpe_centroid)
@@ -485,7 +557,36 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
         hpe_output_vis = hpe_output + hpe_centroid
         if hpe_output_vis.shape[0] > 7:
             last_pred_kp7_abs = hpe_output_vis[7].copy()
-        new_background = create_background(lidar_data[frame_idx], hpe_output_vis, buffer=0.2, num_points=num_new_background_points)
+        gt_kps_abs = keypoints_data[frame_idx]
+
+        per_frame_gt_jerk.append(_mean_joint_jerk(gt_kps_abs, prev_gt_kps, prev_prev_gt_kps))
+        per_frame_pred_jerk.append(_mean_joint_jerk(hpe_output_vis, prev_pred_kps, prev_prev_pred_kps))
+        per_frame_gt_flip.append(_direction_flip_ratio(gt_kps_abs, prev_gt_kps, prev_prev_gt_kps))
+        per_frame_pred_flip.append(_direction_flip_ratio(hpe_output_vis, prev_pred_kps, prev_prev_pred_kps))
+        per_frame_gt_lidar_dist.append(_mean_joint_to_lidar_dist(gt_kps_abs, lidar_data[frame_idx]))
+        per_frame_pred_lidar_dist.append(_mean_joint_to_lidar_dist(hpe_output_vis, lidar_data[frame_idx]))
+
+        prev_prev_gt_kps = prev_gt_kps
+        prev_gt_kps = gt_kps_abs
+        prev_prev_pred_kps = prev_pred_kps
+        prev_pred_kps = hpe_output_vis
+        if use_dynamic_bg:
+            min_coords = np.min(hpe_output_vis, axis=0)
+            max_coords = np.max(hpe_output_vis, axis=0)
+            min_coords = min_coords - 0.2
+            max_coords = max_coords + 0.2
+            lidar_xyz = lidar_data[frame_idx][:, :3]
+            outside_bounds_mask = np.any((lidar_xyz < min_coords) | (lidar_xyz > max_coords), axis=1)
+            curr_bg_num = int(np.sum(outside_bounds_mask))
+            num_background_points = max(1, int(curr_bg_num * background_downsample_rate))
+            num_new_background_points = max(1, int(num_background_points * background_update_rate))
+
+        new_background = create_background(
+            lidar_data[frame_idx],
+            hpe_output_vis,
+            buffer=0.2,
+            num_points=num_new_background_points
+        )
         background_points = update_background(background_points, new_background, num_background_points)
 
     return (
@@ -497,6 +598,12 @@ def evaluate_sequence(seq, loc_model, hpe_model, device, localization_input='mmw
         per_frame_mm_counts,
         per_frame_loc_err,
         per_frame_centroid_err,
+        per_frame_gt_jerk,
+        per_frame_pred_jerk,
+        per_frame_gt_flip,
+        per_frame_pred_flip,
+        per_frame_gt_lidar_dist,
+        per_frame_pred_lidar_dist,
     )
 
 
@@ -526,6 +633,47 @@ def _plot_counts(frame_counts, output_path):
     plt.close()
 
 
+def _plot_metric_pair(frame_means_a, frame_means_b, label_a, label_b, title, ylabel, output_path):
+    x_vals = np.arange(len(frame_means_a))
+    plt.figure(figsize=(10, 4))
+    plt.plot(x_vals, frame_means_a, linewidth=1.5, label=label_a)
+    plt.plot(x_vals, frame_means_b, linewidth=1.5, label=label_b)
+    plt.xlabel('Frame Number')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def _plot_interval_means_pair(interval_means_a, interval_means_b, label_a, label_b, title, ylabel, output_path):
+    x_vals = np.arange(len(interval_means_a))
+    plt.figure(figsize=(10, 4))
+    plt.plot(x_vals, interval_means_a, linewidth=1.5, marker='o', label=label_a)
+    plt.plot(x_vals, interval_means_b, linewidth=1.5, marker='o', label=label_b)
+    plt.xlabel('Interval Index (size=20, start>=5)')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def _welch_ttest(a, b):
+    if len(a) < 2 or len(b) < 2:
+        return float('nan'), float('nan')
+    try:
+        from scipy.stats import ttest_ind
+        t_stat, p_val = ttest_ind(a, b, equal_var=False)
+        return float(t_stat), float(p_val)
+    except Exception:
+        return float('nan'), float('nan')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg', type=str, required=True, help='Path to demo cfg with checkpoints')
@@ -533,11 +681,30 @@ def main():
     parser.add_argument('--split', type=str, default='test_rdn_p3', help='Split name in pkl')
     parser.add_argument('--max_seqs', type=int, default=None, help='Limit number of sequences for quick tests')
     parser.add_argument('--skip_seqs', type=str, default='', help='Comma-separated sequence indices to skip')
+    parser.add_argument(
+        '--pipeline_mode',
+        type=str,
+        default='roi',
+        choices=['roi', 'background_only'],
+        help='roi: localization + ROI; background_only: background reduction only'
+    )
     args = parser.parse_args()
 
     cfg = load_cfg(args.cfg)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     loc_model, hpe_model = load_models(cfg, device)
+
+    print(
+        "[eval] input_modality={input_modality} localization_input={loc_input} split={split} "
+        "pipeline_mode={pipeline_mode} background_downsample_rate={bg_down} background_update_rate={bg_update}".format(
+            input_modality=_cfg_get(cfg, 'input_modality', 'dual'),
+            loc_input=_cfg_get(cfg, 'localization_input', 'mmwave'),
+            split=args.split,
+            pipeline_mode=args.pipeline_mode,
+            bg_down=_cfg_get(cfg, 'background_downsample_rate', None),
+            bg_update=_cfg_get(cfg, 'background_update_rate', None),
+        )
+    )
 
     with open(args.pkl_path, 'rb') as f:
         data = pickle.load(f)
@@ -561,23 +728,35 @@ def main():
     mm_counts_by_frame = {}
     loc_err_by_frame = {}
     centroid_err_by_frame = {}
+    gt_jerk_by_frame = {}
+    pred_jerk_by_frame = {}
+    gt_flip_by_frame = {}
+    pred_flip_by_frame = {}
+    gt_lidar_dist_by_frame = {}
+    pred_lidar_dist_by_frame = {}
     outlier_rows = []
 
-    for seq_idx in split_indices:
+    for seq_idx in tqdm(split_indices, desc='Evaluating', unit='seq'):
         if seq_idx in skip_seqs:
             continue
         seq = data['sequences'][seq_idx]
         (mpjpe_sum, pampjpe_sum, count,
          per_frame_mpjpe, per_frame_pampjpe,
          per_frame_mm_counts, per_frame_loc_err,
-         per_frame_centroid_err) = evaluate_sequence(
+            per_frame_centroid_err,
+            per_frame_gt_jerk, per_frame_pred_jerk,
+            per_frame_gt_flip, per_frame_pred_flip,
+            per_frame_gt_lidar_dist, per_frame_pred_lidar_dist) = evaluate_sequence(
             seq,
             loc_model,
             hpe_model,
             device,
             localization_input=_cfg_get(cfg, 'localization_input', 'mmwave'),
             hpe_input_modality=_cfg_get(cfg, 'input_modality', 'dual'),
-            hpe_fusion_mode=_cfg_get(_cfg_get(cfg, 'model_params', {}), 'fusion_mode', 'none')
+                hpe_fusion_mode=_cfg_get(_cfg_get(cfg, 'model_params', {}), 'fusion_mode', 'none'),
+            pipeline_mode=args.pipeline_mode,
+            background_downsample_rate=_cfg_get(cfg, 'background_downsample_rate', None),
+            background_update_rate=_cfg_get(cfg, 'background_update_rate', None)
         )
         total_mpjpe += mpjpe_sum
         total_pampjpe += pampjpe_sum
@@ -592,6 +771,18 @@ def main():
             loc_err_by_frame.setdefault(frame_idx, []).append(val)
         for frame_idx, val in enumerate(per_frame_centroid_err):
             centroid_err_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_gt_jerk):
+            gt_jerk_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_pred_jerk):
+            pred_jerk_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_gt_flip):
+            gt_flip_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_pred_flip):
+            pred_flip_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_gt_lidar_dist):
+            gt_lidar_dist_by_frame.setdefault(frame_idx, []).append(val)
+        for frame_idx, val in enumerate(per_frame_pred_lidar_dist):
+            pred_lidar_dist_by_frame.setdefault(frame_idx, []).append(val)
 
         for frame_idx in range(len(per_frame_mpjpe)):
             outlier_rows.append({
@@ -602,6 +793,12 @@ def main():
                 'mmwave_points': per_frame_mm_counts[frame_idx],
                 'loc_err': per_frame_loc_err[frame_idx],
                 'centroid_err': per_frame_centroid_err[frame_idx],
+                'gt_jerk': per_frame_gt_jerk[frame_idx],
+                'pred_jerk': per_frame_pred_jerk[frame_idx],
+                'gt_flip': per_frame_gt_flip[frame_idx],
+                'pred_flip': per_frame_pred_flip[frame_idx],
+                'gt_lidar_dist': per_frame_gt_lidar_dist[frame_idx],
+                'pred_lidar_dist': per_frame_pred_lidar_dist[frame_idx],
             })
 
     if total_count == 0:
@@ -623,12 +820,24 @@ def main():
         mm_counts_means = []
         loc_err_means = []
         centroid_err_means = []
+        gt_jerk_means = []
+        pred_jerk_means = []
+        gt_flip_means = []
+        pred_flip_means = []
+        gt_lidar_dist_means = []
+        pred_lidar_dist_means = []
         for frame_idx in range(max_frame + 1):
             mpjpe_vals = mpjpe_by_frame.get(frame_idx, [])
             pampjpe_vals = pampjpe_by_frame.get(frame_idx, [])
             mm_vals = mm_counts_by_frame.get(frame_idx, [])
-            loc_vals = loc_err_by_frame.get(frame_idx, [])
+            loc_vals = [v for v in loc_err_by_frame.get(frame_idx, []) if not np.isnan(v)]
             centroid_vals = centroid_err_by_frame.get(frame_idx, [])
+            gt_jerk_vals = [v for v in gt_jerk_by_frame.get(frame_idx, []) if not np.isnan(v)]
+            pred_jerk_vals = [v for v in pred_jerk_by_frame.get(frame_idx, []) if not np.isnan(v)]
+            gt_flip_vals = [v for v in gt_flip_by_frame.get(frame_idx, []) if not np.isnan(v)]
+            pred_flip_vals = [v for v in pred_flip_by_frame.get(frame_idx, []) if not np.isnan(v)]
+            gt_lidar_vals = [v for v in gt_lidar_dist_by_frame.get(frame_idx, []) if not np.isnan(v)]
+            pred_lidar_vals = [v for v in pred_lidar_dist_by_frame.get(frame_idx, []) if not np.isnan(v)]
             frame_counts.append(len(mpjpe_vals))
             mpjpe_means.append(float(np.mean(mpjpe_vals)) if mpjpe_vals else 0.0)
             pampjpe_means.append(float(np.mean(pampjpe_vals)) if pampjpe_vals else 0.0)
@@ -637,6 +846,12 @@ def main():
             mm_counts_means.append(float(np.mean(mm_vals)) if mm_vals else 0.0)
             loc_err_means.append(float(np.mean(loc_vals)) if loc_vals else 0.0)
             centroid_err_means.append(float(np.mean(centroid_vals)) if centroid_vals else 0.0)
+            gt_jerk_means.append(float(np.mean(gt_jerk_vals)) if gt_jerk_vals else 0.0)
+            pred_jerk_means.append(float(np.mean(pred_jerk_vals)) if pred_jerk_vals else 0.0)
+            gt_flip_means.append(float(np.mean(gt_flip_vals)) if gt_flip_vals else 0.0)
+            pred_flip_means.append(float(np.mean(pred_flip_vals)) if pred_flip_vals else 0.0)
+            gt_lidar_dist_means.append(float(np.mean(gt_lidar_vals)) if gt_lidar_vals else 0.0)
+            pred_lidar_dist_means.append(float(np.mean(pred_lidar_vals)) if pred_lidar_vals else 0.0)
 
         if max_frame >= 20:
             mpjpe_tail = [v for v in mpjpe_means[20:] if v > 0.0]
@@ -683,27 +898,107 @@ def main():
             'Error (m)',
             os.path.join(output_dir, 'centroid_error_by_frame.png')
         )
+        _plot_metric_pair(
+            gt_jerk_means,
+            pred_jerk_means,
+            'GT',
+            'Pred',
+            'Mean Joint Jerk by Frame',
+            'Jerk (m/frame^2)',
+            os.path.join(output_dir, 'jerk_by_frame.png')
+        )
+        _plot_metric_pair(
+            gt_flip_means,
+            pred_flip_means,
+            'GT',
+            'Pred',
+            'Direction Flip Ratio by Frame',
+            'Flip Ratio',
+            os.path.join(output_dir, 'flip_ratio_by_frame.png')
+        )
+        _plot_metric_pair(
+            gt_lidar_dist_means,
+            pred_lidar_dist_means,
+            'GT',
+            'Pred',
+            'Mean Joint-to-LiDAR Distance by Frame',
+            'Distance (m)',
+            os.path.join(output_dir, 'joint_lidar_dist_by_frame.png')
+        )
+
+        interval_size = 20
+        start_frame = 1
+        interval_mpjpe = []
+        interval_pampjpe = []
+        interval_labels = []
+        frame_max = len(mpjpe_means) - 1
+        start = start_frame
+        while start <= frame_max:
+            end = min(start + interval_size - 1, frame_max)
+            interval_labels.append(f"{start}-{end}")
+            interval_mpjpe.append(float(np.mean(mpjpe_means[start:end + 1])))
+            interval_pampjpe.append(float(np.mean(pampjpe_means[start:end + 1])))
+            start += interval_size
+
+        _plot_interval_means_pair(
+            interval_mpjpe,
+            interval_pampjpe,
+            'MPJPE',
+            'PA-MPJPE',
+            'Interval Means (20-frame, start>=1)',
+            'Error (mm)',
+            os.path.join(output_dir, 'mpjpe_pampjpe_interval_means.png')
+        )
+
+        early_frames = range(start_frame, min(start_frame + interval_size, len(mpjpe_means)))
+        late_start = max(start_frame, len(mpjpe_means) - interval_size)
+        late_frames = range(late_start, len(mpjpe_means))
+
+        early_mpjpe = [v for f in early_frames for v in mpjpe_by_frame.get(f, [])]
+        late_mpjpe = [v for f in late_frames for v in mpjpe_by_frame.get(f, [])]
+        early_pampjpe = [v for f in early_frames for v in pampjpe_by_frame.get(f, [])]
+        late_pampjpe = [v for f in late_frames for v in pampjpe_by_frame.get(f, [])]
+
+        t_mpjpe, p_mpjpe = _welch_ttest(early_mpjpe, late_mpjpe)
+        t_pampjpe, p_pampjpe = _welch_ttest(early_pampjpe, late_pampjpe)
+        print("==================== EARLY VS LATE (20 frames) ====================")
+        print(f"MPJPE early_mean={np.mean(early_mpjpe):.3f} late_mean={np.mean(late_mpjpe):.3f} t={t_mpjpe:.3f} p={p_mpjpe:.3g}")
+        print(f"PA-MPJPE early_mean={np.mean(early_pampjpe):.3f} late_mean={np.mean(late_pampjpe):.3f} t={t_pampjpe:.3f} p={p_pampjpe:.3g}")
+        print("====================================================================")
 
         csv_path = os.path.join(output_dir, 'metrics_by_frame.csv')
         with open(csv_path, 'w', encoding='ascii') as f:
-            f.write('frame,mpjpe_mean,mpjpe_std,pampjpe_mean,pampjpe_std,count,mmwave_points_mean,loc_err_mean,centroid_err_mean\n')
+            f.write(
+                'frame,mpjpe_mean,mpjpe_std,pampjpe_mean,pampjpe_std,count,mmwave_points_mean,'
+                'loc_err_mean,centroid_err_mean,gt_jerk_mean,pred_jerk_mean,gt_flip_mean,'
+                'pred_flip_mean,gt_lidar_dist_mean,pred_lidar_dist_mean\n'
+            )
             for frame_idx in range(max_frame + 1):
                 f.write(
                     f"{frame_idx},{mpjpe_means[frame_idx]:.6f},{mpjpe_stds[frame_idx]:.6f},"
                     f"{pampjpe_means[frame_idx]:.6f},{pampjpe_stds[frame_idx]:.6f},"
                     f"{frame_counts[frame_idx]},{mm_counts_means[frame_idx]:.6f},"
-                    f"{loc_err_means[frame_idx]:.6f},{centroid_err_means[frame_idx]:.6f}\n"
+                    f"{loc_err_means[frame_idx]:.6f},{centroid_err_means[frame_idx]:.6f},"
+                    f"{gt_jerk_means[frame_idx]:.6f},{pred_jerk_means[frame_idx]:.6f},"
+                    f"{gt_flip_means[frame_idx]:.6f},{pred_flip_means[frame_idx]:.6f},"
+                    f"{gt_lidar_dist_means[frame_idx]:.6f},{pred_lidar_dist_means[frame_idx]:.6f}\n"
                 )
 
         outlier_rows.sort(key=lambda r: r['mpjpe'], reverse=True)
         outlier_path = os.path.join(output_dir, 'outliers_by_mpjpe.csv')
         with open(outlier_path, 'w', encoding='ascii') as f:
-            f.write('seq_idx,frame_idx,mpjpe,pampjpe,mmwave_points,loc_err,centroid_err\n')
+            f.write(
+                'seq_idx,frame_idx,mpjpe,pampjpe,mmwave_points,loc_err,centroid_err,'
+                'gt_jerk,pred_jerk,gt_flip,pred_flip,gt_lidar_dist,pred_lidar_dist\n'
+            )
             for row in outlier_rows[:200]:
                 f.write(
                     f"{row['seq_idx']},{row['frame_idx']},{row['mpjpe']:.6f},"
                     f"{row['pampjpe']:.6f},{row['mmwave_points']},"
-                    f"{row['loc_err']:.6f},{row['centroid_err']:.6f}\n"
+                    f"{row['loc_err']:.6f},{row['centroid_err']:.6f},"
+                    f"{row['gt_jerk']:.6f},{row['pred_jerk']:.6f},"
+                    f"{row['gt_flip']:.6f},{row['pred_flip']:.6f},"
+                    f"{row['gt_lidar_dist']:.6f},{row['pred_lidar_dist']:.6f}\n"
                 )
 
 

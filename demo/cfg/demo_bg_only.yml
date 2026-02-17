@@ -6,16 +6,16 @@ clip_grad: null
 precision: 16
 #original 100
 epochs: &epochs 30
-localization_input: mmwave # Options: 'lidar', 'mmwave', 'feature_transferred_lidar'
+localization_input: feature_transferred_lidar # Options: 'lidar', 'mmwave', 'feature_transferred_lidar'
 input_modality: dual # Options: 'lidar', 'mmwave', 'dual'
-background_downsample_rate: 0.5
+background_downsample_rate: 1.0
 background_update_rate: 0.25
 # --------------------------------------
 # Model parameters
 # --------------------------------------
 # mode: train
 # localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default/HumanLocalizeP4Transformer-epoch=23-val_loss=0.0109.ckpt
-localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default/HumanLocalizeP4Transformer-epoch=23-val_loss=0.0109.ckpt
+localization_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/human_localization_module_default_lidar/HumanLocalizeP4Transformer-epoch=11-val_loss=0.0012.ckpt
 localization_model_name: HumanLocalizeP4Transformer
 localization_model_params: 
   radius: 0.7
@@ -36,7 +36,7 @@ localization_model_params:
 # Model parameters
 # --------------------------------------
 # mode: train
-model_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/roi_bg_128_default_mmloc_05_025/P4Transformer-epoch=17-val_mpjpe=0.0690.ckpt
+model_checkpoint: /home/ryan/MM-Fi/LEMT/logs/mmfi_p4t/bg_only_128_default_late_10_025/P4Transformer-epoch=17-val_mpjpe=0.0597.ckpt
 model_name: P4Transformer
 model_params:
   fusion_mode: 'dual'     # Options: 'none', 'dual'

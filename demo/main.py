@@ -746,6 +746,9 @@ def main(args):
     min_allowed_mmwave_points = 10
     localization_input = getattr(args, 'localization_input', 'mmwave')
     input_modality = getattr(args, 'input_modality', 'dual')
+    background_downsample_rate = getattr(args, 'background_downsample_rate', None)
+    background_update_rate = getattr(args, 'background_update_rate', None)
+    use_dynamic_bg = background_downsample_rate is not None and background_update_rate is not None
     hpe_fusion_mode = args.model_params.get('fusion_mode', 'none') if hasattr(args, 'model_params') else 'none'
     if hpe_fusion_mode == 'dual':
         assert input_modality == 'dual', "fusion_mode 'dual' requires input_modality 'dual'"
@@ -895,6 +898,8 @@ def main(args):
             x_raw = 0.0
             x_roi = 4.0
             x_hpe = 8.0
+            x_pose_pred = 14.0
+            x_pose_gt = 20.0
 
             gt_loc = keypoints_data[frame_idx][7]
             rr.log(
@@ -1184,7 +1189,73 @@ def main(args):
                     color=(255, 0, 0)
                 )
 
-            new_background = create_background(lidar_data[frame_idx], hpe_output_vis, buffer=0.2, num_points=num_new_background_points)
+                rr.log(
+                    "pose_pred/lidar",
+                    rr.Points3D(
+                        _rerun_swap_y_up(_rerun_offset_x(original_lidar_for_vis, x_pose_pred)),
+                        colors=[(150, 180, 255)]
+                    )
+                )
+                rr.log(
+                    "pose_pred/mmwave",
+                    rr.Points3D(
+                        _rerun_swap_y_up(_rerun_offset_x(original_mmwave_for_vis[:, :3], x_pose_pred)),
+                        colors=[(255, 210, 150)]
+                    )
+                )
+                pred_pose_raw = _rerun_offset_x(hpe_output_vis, x_pose_pred)
+                rr.log(
+                    "pose_pred/pred_keypoints",
+                    rr.Points3D(_rerun_swap_y_up(pred_pose_raw), colors=[(255, 0, 0)])
+                )
+                _rerun_log_skeleton(
+                    "pose_pred/pred_skeleton",
+                    _rerun_swap_y_up(pred_pose_raw),
+                    color=(255, 0, 0)
+                )
+
+                rr.log(
+                    "pose_gt/lidar",
+                    rr.Points3D(
+                        _rerun_swap_y_up(_rerun_offset_x(original_lidar_for_vis, x_pose_gt)),
+                        colors=[(150, 180, 255)]
+                    )
+                )
+                rr.log(
+                    "pose_gt/mmwave",
+                    rr.Points3D(
+                        _rerun_swap_y_up(_rerun_offset_x(original_mmwave_for_vis[:, :3], x_pose_gt)),
+                        colors=[(255, 210, 150)]
+                    )
+                )
+                gt_pose_raw = _rerun_offset_x(original_gt_for_vis, x_pose_gt)
+                rr.log(
+                    "pose_gt/gt_keypoints",
+                    rr.Points3D(_rerun_swap_y_up(gt_pose_raw), colors=[(0, 255, 0)])
+                )
+                _rerun_log_skeleton(
+                    "pose_gt/gt_skeleton",
+                    _rerun_swap_y_up(gt_pose_raw),
+                    color=(0, 255, 0)
+                )
+
+            if use_dynamic_bg:
+                min_coords = np.min(hpe_output_vis, axis=0)
+                max_coords = np.max(hpe_output_vis, axis=0)
+                min_coords = min_coords - 0.2
+                max_coords = max_coords + 0.2
+                lidar_xyz = lidar_data[frame_idx][:, :3]
+                outside_bounds_mask = np.any((lidar_xyz < min_coords) | (lidar_xyz > max_coords), axis=1)
+                curr_bg_num = int(np.sum(outside_bounds_mask))
+                num_background_points = max(1, int(curr_bg_num * background_downsample_rate))
+                num_new_background_points = max(1, int(num_background_points * background_update_rate))
+
+            new_background = create_background(
+                lidar_data[frame_idx],
+                hpe_output_vis,
+                buffer=0.2,
+                num_points=num_new_background_points
+            )
             # print(f"Created new background with {new_background.shape[0]} points.")
 
             background_points = update_background(background_points, new_background, num_background_points)

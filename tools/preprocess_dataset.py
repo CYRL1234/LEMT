@@ -353,10 +353,10 @@ class MiliPointPreprocessor(Preprocessor):
 class MMFiPreprocessor(Preprocessor):
     def __init__(self, root_dir, out_dir, modality='mmwave', localization_checkpoint=None,
                  localization_model_name=None, localization_model_params=None, device=None, split_mode='random', seed = 0,
-                 localization_input='mmwave'):
+                 localization_input='mmwave', background_downsample_rate=None, background_update_rate=None):
         super().__init__(root_dir, out_dir)
         self.action_p1 = ['2', '3', '4', '5', '13', '14', '17', '18', '19', '20', '21', '22', '23', '27']
-        assert modality in ['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual']
+        assert modality in ['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual', 'bg_only_dual']
         self.modality = modality
         self.localization_checkpoint = localization_checkpoint
         self.localization_model_name = localization_model_name
@@ -367,6 +367,8 @@ class MMFiPreprocessor(Preprocessor):
         self.split_mode = split_mode
         self._fixed_rng = np.random.RandomState(seed) # For fixed separation splitting, 42 is arbitrary seed which will produce same splits every time
         self.seed = seed
+        self.background_downsample_rate = background_downsample_rate
+        self.background_update_rate = background_update_rate
 
     def _load_localization_model(self):
         if self.localization_model is not None:
@@ -399,6 +401,16 @@ class MMFiPreprocessor(Preprocessor):
 
     def process(self):
         # print("modality: ",self.modality)
+        print(
+            "[MMFiPreprocessor] modality={modality} localization_input={loc_input} split_mode={split_mode} "
+            "background_downsample_rate={bg_down} background_update_rate={bg_update}".format(
+                modality=self.modality,
+                loc_input=self.localization_input,
+                split_mode=self.split_mode,
+                bg_down=self.background_downsample_rate,
+                bg_update=self.background_update_rate,
+            )
+        )
         dirs = sorted(glob(os.path.join(self.root_dir, 'E*/S*/A*')))
 
         seq_idxs = np.arange(len(dirs))
@@ -456,8 +468,12 @@ class MMFiPreprocessor(Preprocessor):
                 # --- ROI + Background pipeline (match demo/main.py) ---
                 clip_len = 5
                 max_points = 128
-                num_background_points = 2048
-                num_new_background_points = 1024
+                num_background_points = 512 #original 2048
+                num_new_background_points = 128 #original 1024, 256
+                use_dynamic_bg = (
+                    self.background_downsample_rate is not None and
+                    self.background_update_rate is not None
+                )
 
                 background_points = None
                 previous_mmwave_frames = []
@@ -545,7 +561,179 @@ class MMFiPreprocessor(Preprocessor):
                     new_kps.append(kp_frame)
                     new_mms.append(extracted_mmwave)
 
-                    new_background = create_background(lidar_frame, kp_frame, buffer=0.2, num_points=num_new_background_points)
+                    if use_dynamic_bg:
+                        min_coords = np.min(kp_frame, axis=0)
+                        max_coords = np.max(kp_frame, axis=0)
+                        min_coords = min_coords - 0.2
+                        max_coords = max_coords + 0.2
+                        lidar_xyz = lidar_frame[:, :3]
+                        outside_bounds_mask = np.any((lidar_xyz < min_coords) | (lidar_xyz > max_coords), axis=1)
+                        curr_bg_num = int(np.sum(outside_bounds_mask))
+                        num_background_points = max(1, int(curr_bg_num * self.background_downsample_rate))
+                        num_new_background_points = max(1, int(num_background_points * self.background_update_rate))
+
+                    new_background = create_background(
+                        lidar_frame,
+                        kp_frame,
+                        buffer=0.2,
+                        num_points=num_new_background_points
+                    )
+                    background_points = update_background(background_points, new_background, num_background_points)
+
+                self.results['sequences'].append({
+                    'point_clouds': new_pcs,
+                    'keypoints': np.stack(new_kps),
+                    'action': action,
+                    'mmwave_data': new_mms
+                })
+
+                # Split assignment happens below for all modalities
+                if i in self.results['splits']['train_rdn_p3']:
+                    if action in self.action_p1:
+                        self._add_to_split('train_rdn_p1', i)
+                    else:
+                        self._add_to_split('train_rdn_p2', i)
+                elif i in self.results['splits']['val_rdn_p3']:
+                    if action in self.action_p1:
+                        self._add_to_split('val_rdn_p1', i)
+                    else:
+                        self._add_to_split('val_rdn_p2', i)
+                else:
+                    if action in self.action_p1:
+                        self._add_to_split('test_rdn_p1', i)
+                    else:
+                        self._add_to_split('test_rdn_p2', i)
+
+                if subject % 5 == 0:
+                    self._add_to_split('test_xsub_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('test_xsub_p1', i)
+                    else:
+                        self._add_to_split('test_xsub_p2', i)
+                elif subject % 5 == 1:
+                    self._add_to_split('val_xsub_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('val_xsub_p1', i)
+                    else:
+                        self._add_to_split('val_xsub_p2', i)
+                else:
+                    self._add_to_split('train_xsub_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('train_xsub_p1', i)
+                    else:
+                        self._add_to_split('train_xsub_p2', i)
+
+                if env == 4:
+                    self._add_to_split('test_xenv_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('test_xenv_p1', i)
+                    else:
+                        self._add_to_split('test_xenv_p2', i)
+                elif env == 3:
+                    self._add_to_split('val_xenv_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('val_xenv_p1', i)
+                    else:
+                        self._add_to_split('val_xenv_p2', i)
+                else:
+                    self._add_to_split('train_xenv_p3', i)
+                    if action in self.action_p1:
+                        self._add_to_split('train_xenv_p1', i)
+                    else:
+                        self._add_to_split('train_xenv_p2', i)
+
+                continue
+            elif self.modality == 'bg_only_dual':
+                # --- Load mmWave and align frames with LiDAR ---
+                mmwave_map = {}
+                mmwave_indices = []
+                for bin_fn in sorted(glob(os.path.join(d, "mmwave", "frame*.bin"))):
+                    data_tmp = self._read_bin(bin_fn, True)
+                    data_tmp[:, -1] = self._normalize_intensity(data_tmp[:, -1], 40.0)
+                    data_tmp = data_tmp[:, [1, 2, 0, 3, 4]]
+                    data_tmp[:, 1] *= -1  # negate y
+                    data_tmp[:, 2] += 0.1  # z + 0.1
+                    keep_idx = int(os.path.basename(bin_fn).split('.')[0][5:]) - 1
+                    mmwave_map[keep_idx] = data_tmp
+                    mmwave_indices.append(keep_idx)
+
+                lidar_map = {}
+                lidar_indices = []
+                for bin_fn in sorted(glob(os.path.join(d, "lidar", "frame*.bin"))):
+                    data_tmp = self._read_bin(bin_fn)
+                    data_tmp = data_tmp[:, [1, 2, 0]]
+                    data_tmp[..., 0] = -data_tmp[..., 0]
+                    lidar_idx = int(os.path.basename(bin_fn).split('.')[0][5:]) - 1
+                    lidar_map[lidar_idx] = data_tmp
+                    lidar_indices.append(lidar_idx)
+
+                valid_indices = sorted(set(mmwave_indices).intersection(lidar_indices))
+                if len(valid_indices) == 0:
+                    continue
+
+                kps = np.load(os.path.join(d, 'ground_truth.npy'))
+                kps[..., 1] = -kps[..., 1] - 0.2
+                kps[..., 2] = kps[..., 2] - 0.1
+                kps = kps[valid_indices]
+
+                pcs = [lidar_map[idx] for idx in valid_indices]
+                pcs_mmwave = [mmwave_map[idx] for idx in valid_indices]
+
+                num_background_points = 1024 #original 2048
+                num_new_background_points = 128 #original 1024, 256
+                use_dynamic_bg = (
+                    self.background_downsample_rate is not None and
+                    self.background_update_rate is not None
+                )
+
+                if use_dynamic_bg:
+                    min_coords = np.min(kps[0], axis=0)
+                    max_coords = np.max(kps[0], axis=0)
+                    min_coords = min_coords - 0.2
+                    max_coords = max_coords + 0.2
+                    lidar_xyz = pcs[0][:, :3]
+                    outside_bounds_mask = np.any((lidar_xyz < min_coords) | (lidar_xyz > max_coords), axis=1)
+                    curr_bg_num = int(np.sum(outside_bounds_mask))
+                    num_background_points = max(1, int(curr_bg_num * self.background_downsample_rate))
+                    num_new_background_points = max(1, int(num_background_points * self.background_update_rate))
+
+                background_points = create_background(
+                    pcs[0],
+                    kps[0],
+                    buffer=0.2,
+                    num_points=num_background_points
+                )
+
+                new_pcs = []
+                new_kps = []
+                new_mms = []
+                for lidar_frame, mm_frame, kp_frame in zip(pcs, pcs_mmwave, kps):
+                    if background_points is not None:
+                        filtered_lidar = remove_background(lidar_frame, background_points, buffer=0.1)
+                    else:
+                        filtered_lidar = lidar_frame
+
+                    new_pcs.append(filtered_lidar)
+                    new_kps.append(kp_frame)
+                    new_mms.append(mm_frame)
+
+                    if use_dynamic_bg:
+                        min_coords = np.min(kp_frame, axis=0)
+                        max_coords = np.max(kp_frame, axis=0)
+                        min_coords = min_coords - 0.2
+                        max_coords = max_coords + 0.2
+                        lidar_xyz = lidar_frame[:, :3]
+                        outside_bounds_mask = np.any((lidar_xyz < min_coords) | (lidar_xyz > max_coords), axis=1)
+                        curr_bg_num = int(np.sum(outside_bounds_mask))
+                        num_background_points = max(1, int(curr_bg_num * self.background_downsample_rate))
+                        num_new_background_points = max(1, int(num_background_points * self.background_update_rate))
+
+                    new_background = create_background(
+                        lidar_frame,
+                        kp_frame,
+                        buffer=0.2,
+                        num_points=num_new_background_points
+                    )
                     background_points = update_background(background_points, new_background, num_background_points)
 
                 self.results['sequences'].append({
@@ -1105,16 +1293,16 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='mmfi', choices=['mili', 'mmfi', 'mmbody', 'mri'])
     parser.add_argument('--root_dir', type=str, default='/home/ryan/MM-Fi/MMFi_Dataset', help='Path to the root directory of the dataset')
     parser.add_argument('--out_dir', type=str, default='/home/ryan/MM-Fi/LEMT/data_dual', help='Path to the output directory')
-    parser.add_argument('--modality', type=str, default='dual', choices=['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual'])
+    parser.add_argument('--modality', type=str, default='dual', choices=['mmwave', 'lidar', 'dual', 'raw_dual', 'roi_bg_dual', 'bg_only_dual'])
     parser.add_argument('--localization_checkpoint', type=str, default=None, help='Path to trained localization checkpoint')
     parser.add_argument('--localization_model_name', type=str, default=None, help='Override localization model name')
     parser.add_argument('--localization_model_params', type=str, default=None, help='JSON string for localization model params')
     parser.add_argument('--split_mode', type=str, default='random', choices=['random', 'fixed_seperation'], help='MMFi split mode')
     args = parser.parse_args()
 
-    if args.modality == 'roi_bg_dual':
+    if args.modality == 'roi_bg_dual' or args.modality == 'bg_only_dual':
         if not args.cfg:
-            raise ValueError("roi_bg_dual requires --cfg with localization settings")
+            raise ValueError("roi_bg_dual and bg_only_dual require --cfg with localization settings")
         cfg = load_cfg(args.cfg)
         args = merge_args_cfg(args, cfg)
 
@@ -1135,7 +1323,9 @@ if __name__ == '__main__':
             localization_model_params=localization_model_params,
             localization_input=getattr(args, 'localization_input', 'mmwave'),
             split_mode=args.split_mode,
-            seed = args.seed
+            seed = args.seed,
+            background_downsample_rate=getattr(args, 'background_downsample_rate', None),
+            background_update_rate=getattr(args, 'background_update_rate', None)
         )
     elif args.dataset == 'mili':
         preprocessor = MiliPointPreprocessor(args.root_dir, args.out_dir)

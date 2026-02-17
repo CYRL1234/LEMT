@@ -3,9 +3,9 @@
 # --------------------------------------
 dataset: mmfi
 root_dir: /home/ryan/MM-Fi/MMFi_Dataset
-out_dir: /home/ryan/MM-Fi/LEMT/data_roi_bg
+out_dir: /home/ryan/MM-Fi/LEMT/data_bg_only_dual
 localization_input: mmwave
-background_downsample_rate: 0.25
+background_downsample_rate: 0.5
 background_update_rate: 0.25
 # --------------------------------------
 # Localization model parameters
